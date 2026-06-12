@@ -25,6 +25,7 @@
 #include "mcp2515.h"
 #include <stdio.h>
 #include <string.h>
+#include <stdbool.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -492,6 +493,9 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8|GPIO_PIN_9, GPIO_PIN_RESET);
 
+  /* **[추가된 설정]** 부팅 시 릴레이의 초기 출력 레벨 설정 (Active Low 기준 초기 OFF 상태 유지) */
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_SET);
+
   /*Configure GPIO pin : B1_Pin */
   GPIO_InitStruct.Pin = B1_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
@@ -513,6 +517,13 @@ static void MX_GPIO_Init(void)
 
   /*Configure GPIO pins : PB8 PB9 */
   GPIO_InitStruct.Pin = GPIO_PIN_8|GPIO_PIN_9;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /* **[추가된 설정]** PB10 (릴레이 제어 핀) GPIO 설정 */
+  GPIO_InitStruct.Pin = GPIO_PIN_10;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -647,31 +658,113 @@ static void DisplayTask(void *argument)
 void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN 5 */
-  bool last_state = false;
+
+  // 시스템 상태를 관리하는 열거형
+  typedef enum {
+    STAGE_FORWARD,       // 평상시: 컨베이어 작동 + 5초 전진
+    STAGE_BACKWARD,      // 평상시: 컨베이어 작동 + 5초 후진
+    STAGE_EMERGENCY_LOCK // 비상 상황: 컨베이어 정지 + 10초 강제 후진
+  } ActuatorStage;
+
+  ActuatorStage current_stage = STAGE_FORWARD;
+  uint32_t stage_start_tick = osKernelGetTickCount();
 
   for (;;)
   {
     bool detected = ReadSensor();
+    uint32_t current_tick = osKernelGetTickCount();
 
-    if (detected != last_state)
+    /* =============================================================
+     * 1. 상태 및 타이머 제어 로직 (State Machine)
+     * ============================================================= */
+    if (current_stage == STAGE_EMERGENCY_LOCK)
     {
-      last_state = detected;
-
+      // [비상 모드] 벨트가 멈추고 액추에이터가 후진하는 중... 5초 체크
+      if ((current_tick - stage_start_tick) >= 5000U)
+      {
+        // 10초가 지났고, 센서 앞에 장애물도 완전히 청소되었다면 평상시로 복귀
+        if (!ReadSensor())
+        {
+          current_stage = STAGE_FORWARD;
+          stage_start_tick = current_tick;
+          printf("[SYSTEM] Emergency Clear! Belt RESTART / Actuator FORWARD\r\n");
+        }
+        else
+        {
+          // 10초가 지났는데도 여전히 물체가 감지 중이라면 비상 상태(후진/벨트정지) 연장
+          stage_start_tick = current_tick;
+          printf("[SYSTEM] Obstacle still remains. Extending Emergency...\r\n");
+        }
+      }
+    }
+    else
+    {
+      // [평상시 모드] 컨베이어가 잘 돌고 있는 와중에 물체가 감지되면 즉시 비상 모드 진입
       if (detected)
       {
-        HAL_GPIO_WritePin(ACT1_IN1_GPIO_Port, ACT1_IN1_Pin, GPIO_PIN_SET);
-        HAL_GPIO_WritePin(ACT1_IN2_GPIO_Port, ACT1_IN2_Pin, GPIO_PIN_RESET);
-        printf("[ACT1] Forward (obstacle detected)\r\n");
+        current_stage = STAGE_EMERGENCY_LOCK;
+        stage_start_tick = current_tick; // 10초 카운트다운 시작
+        printf("[ALERT] Obstacle Detected! Conveyor STOP / Actuator Emergency Backward\r\n");
       }
       else
       {
-        HAL_GPIO_WritePin(ACT1_IN1_GPIO_Port, ACT1_IN1_Pin, GPIO_PIN_RESET);
-        HAL_GPIO_WritePin(ACT1_IN2_GPIO_Port, ACT1_IN2_Pin, GPIO_PIN_SET);
-        printf("[ACT1] Backward (no obstacle)\r\n");
+        // 평상시: 컨베이어 벨트는 계속 도는 와중에, 액추에이터만 5초 간격 교대 작동
+        if ((current_tick - stage_start_tick) >= 5000U)
+        {
+          if (current_stage == STAGE_FORWARD)
+          {
+            current_stage = STAGE_BACKWARD;
+            printf("[NORMAL] 5s passed. Actuator -> BACKWARD (Conveyor Running)\r\n");
+          }
+          else
+          {
+            current_stage = STAGE_FORWARD;
+            printf("[NORMAL] 5s passed. Actuator -> FORWARD (Conveyor Running)\r\n");
+          }
+          stage_start_tick = current_tick;
+        }
       }
     }
 
-    osDelay(50);
+    /* =============================================================
+     * 2. 하드웨어 출력 제어 (릴레이 및 L298N 드라이빙)
+     * ============================================================= */
+    if (current_stage == STAGE_EMERGENCY_LOCK)
+    {
+      /* -----------------------------------------------------------
+       * [비상 상황] 컨베이어 벨트 즉시 정지 & 액추에이터 10초 후진
+       * ----------------------------------------------------------- */
+      // Active High 릴레이 기준: LOW = 릴레이 완전히 OFF (컨베이어 정지)
+      HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_RESET);
+
+      // L298N 모터 드라이버 후진 신호 인가
+      HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_RESET);  // IN1 = LOW
+      HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_SET);    // IN2 = HIGH
+    }
+    else
+    {
+      /* -----------------------------------------------------------
+       * [평상시] 컨베이어 벨트 무조건 작동 (ON) & 액추에이터 5초 교대
+       * ----------------------------------------------------------- */
+      // Active High 릴레이 기준: HIGH = 릴레이 항상 ON (컨베이어 계속 작동)
+      HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_SET);
+
+      if (current_stage == STAGE_FORWARD)
+      {
+        // 5초 동안 전진 구동
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_SET);   // IN1 = HIGH
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_RESET); // IN2 = LOW
+      }
+      else
+      {
+        // 5초 동안 후진 구동
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_RESET); // IN1 = LOW
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_SET);   // IN2 = HIGH
+      }
+    }
+
+    // 50ms 주기로 센서 및 타이머 상태를 매우 빠르게 스캔
+    osDelay(50U);
   }
   /* USER CODE END 5 */
 }
@@ -715,7 +808,7 @@ void Error_Handler(void)
 #ifdef USE_FULL_ASSERT
 /**
   * @brief  Reports the name of the source file and the source line number
-  *         where the assert_param error has occurred.
+  * where the assert_param error has occurred.
   * @param  file: pointer to the source file name
   * @param  line: assert_param error line source number
   * @retval None
