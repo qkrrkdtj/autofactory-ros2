@@ -492,6 +492,9 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8|GPIO_PIN_9, GPIO_PIN_RESET);
 
+  /* [추가] pill_board 신호 전송용 PA1 초기 레벨 LOW 세팅 */
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_RESET);
+
   /*Configure GPIO pin : B1_Pin */
   GPIO_InitStruct.Pin = B1_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
@@ -517,6 +520,22 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  // ========================================================
+  // [추가] pill_board 연동 하드웨어 유선 제어 핀 초기화
+  // ========================================================
+  // 1. PA1: pill_board로 트리거 신호를 주는 출력 핀
+  GPIO_InitStruct.Pin = GPIO_PIN_1;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  // 2. PA2: pill_board로부터 회전 완료 신호를 받는 입력 핀 (Pull-down)
+  GPIO_InitStruct.Pin = GPIO_PIN_2;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
   /* CS pin must start HIGH (inactive) — CubeMX generates RESET incorrectly */
@@ -549,6 +568,13 @@ static void SensorTxTask(void *argument)
     osMutexAcquire(stateMutex, osWaitForever);
     node_states[g_node_id].sensor = sensor_now;
     osMutexRelease(stateMutex);
+
+    // [유선 연동 변경점] 센서 감지 상태를 pill_board용 유선 통신 핀(PA1)에 실시간 매핑
+    if (sensor_now) {
+      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_SET); // pill_board로 트리거 출력 On
+    } else {
+      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_RESET); // pill_board 트리거 Off
+    }
 
     if (sensor_now != last_sensor || (now - last_tx_tick) >= 200U)
     {
@@ -648,6 +674,7 @@ void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN 5 */
   bool last_state = false;
+  bool last_pill_done = false;
 
   for (;;)
   {
@@ -659,72 +686,51 @@ void StartDefaultTask(void *argument)
 
       if (detected)
       {
-        HAL_GPIO_WritePin(ACT1_IN1_GPIO_Port, ACT1_IN1_Pin, GPIO_PIN_SET);
-        HAL_GPIO_WritePin(ACT1_IN2_GPIO_Port, ACT1_IN2_Pin, GPIO_PIN_RESET);
-        printf("[ACT1] Forward (obstacle detected)\r\n");
+        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);
+        printf("[ACT1] Forward (obstacle detected) -> Wire Signal Sent to Pill Board\r\n");
       }
       else
       {
-        HAL_GPIO_WritePin(ACT1_IN1_GPIO_Port, ACT1_IN1_Pin, GPIO_PIN_RESET);
-        HAL_GPIO_WritePin(ACT1_IN2_GPIO_Port, ACT1_IN2_Pin, GPIO_PIN_SET);
+        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_RESET);
         printf("[ACT1] Backward (no obstacle)\r\n");
       }
     }
 
-    osDelay(50);
+    // [유선 연동 변경점] pill_board로부터 모터 회전 완료 신호(PA2) 수신 체크
+    bool pill_done_now = (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_2) == GPIO_PIN_SET);
+
+    if (pill_done_now && !last_pill_done)
+    {
+      // 완료 신호가 들어오는 순간(Rising Edge) 캐치
+      printf("[INTERLOCK] Pill Board completed 60 deg rotation successfully!\r\n");
+
+      // 안정적인 인터록 해제를 위해 트리거 핀(PA1)을 일시적으로 초기화
+      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_RESET);
+    }
+    last_pill_done = pill_done_now;
+
+    osDelay(20);
   }
   /* USER CODE END 5 */
 }
 
-/**
-  * @brief  Period elapsed callback in non blocking mode
-  * @note   This function is called  when TIM11 interrupt took place, inside
-  * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
-  * a global variable "uwTick" used as application time base.
-  * @param  htim : TIM handle
-  * @retval None
-  */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
-  /* USER CODE BEGIN Callback 0 */
-
-  /* USER CODE END Callback 0 */
   if (htim->Instance == TIM11)
   {
     HAL_IncTick();
   }
-  /* USER CODE BEGIN Callback 1 */
-
-  /* USER CODE END Callback 1 */
 }
 
-/**
-  * @brief  This function is executed in case of error occurrence.
-  * @retval None
-  */
 void Error_Handler(void)
 {
-  /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
   while (1)
   {
   }
-  /* USER CODE END Error_Handler_Debug */
 }
 #ifdef USE_FULL_ASSERT
-/**
-  * @brief  Reports the name of the source file and the source line number
-  *         where the assert_param error has occurred.
-  * @param  file: pointer to the source file name
-  * @param  line: assert_param error line source number
-  * @retval None
-  */
 void assert_failed(uint8_t *file, uint32_t line)
 {
-  /* USER CODE BEGIN 6 */
-  /* User can add his own implementation to report the file name and line number,
-     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
-  /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
