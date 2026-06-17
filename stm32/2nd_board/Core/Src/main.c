@@ -2,16 +2,12 @@
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : Main program body
+  * @brief          : Main program body for L298N & Relay Sequence Control
   ******************************************************************************
   * @attention
   *
   * Copyright (c) 2026 STMicroelectronics.
   * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
   *
   ******************************************************************************
   */
@@ -19,202 +15,73 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "cmsis_os.h"
+#include <stdio.h>
+#include <string.h>
+#include <stdbool.h>
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "mcp2515.h"
-#include <stdio.h>
-#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-/* constants moved to main.h (shared with freertos.c) */
+/* 센서 감지 매크로 정의 (일반적인 적외선 센서는 감지 시 LOW 출력(NPN형) 기준) */
+/* 만약 감지 시 HIGH가 출력되는 센서라면 == GPIO_PIN_SET 으로 수정하세요. */
+#define SENSOR1_DETECTED() (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_1) == GPIO_PIN_RESET)
+#define SENSOR2_DETECTED() (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_2) == GPIO_PIN_RESET)
+
+/* 5V 릴레이 제어 편의 기능 (S: PB14) */
+#define RELAY_ON()        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET)
+#define RELAY_OFF()       HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET)
+
+/* 1번 액추에이터 제어 (IN1: PB8, IN2: PB9) */
+#define ACT1_FORWARD()    do { HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_SET);   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_RESET); } while(0)
+#define ACT1_BACKWARD()   do { HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_RESET); HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_SET);   } while(0)
+#define ACT1_STOP()       do { HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_RESET); HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_RESET); } while(0)
+
+/* 2번 액추에이터 제어 (IN3: PB12, IN4: PB13) */
+#define ACT2_FORWARD()    do { HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_SET);   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_13, GPIO_PIN_RESET); } while(0)
+#define ACT2_BACKWARD()   do { HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_RESET); HAL_GPIO_WritePin(GPIOB, GPIO_PIN_13, GPIO_PIN_SET);   } while(0)
+#define ACT2_STOP()       do { HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_RESET); HAL_GPIO_WritePin(GPIOB, GPIO_PIN_13, GPIO_PIN_RESET); } while(0)
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-SPI_HandleTypeDef hspi1;
-
 UART_HandleTypeDef huart2;
 
 /* Definitions for defaultTask */
 osThreadId_t defaultTaskHandle;
 const osThreadAttr_t defaultTask_attributes = {
   .name = "defaultTask",
-  .stack_size = 128 * 4,
+  .stack_size = 512 * 4, // 시퀀스 처리 및 printf 출력을 위해 스택 확보
   .priority = (osPriority_t) osPriorityNormal,
 };
-/* USER CODE BEGIN PV */
-MCP2515_HandleTypeDef hmcp2515;
-uint8_t               g_node_id;
-NodeState             node_states[NODE_COUNT + 1U];
 
-osMutexId_t        spiMutex;
-osMutexId_t        stateMutex;
-osMessageQueueId_t canTxQueue;
+/* USER CODE BEGIN PV */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART2_UART_Init(void);
-static void MX_SPI1_Init(void);
 void StartDefaultTask(void *argument);
 
 /* USER CODE BEGIN PFP */
-static HAL_StatusTypeDef Flash_ReadNodeId(uint8_t *node_id);
-static HAL_StatusTypeDef Flash_WriteNodeId(uint8_t node_id);
-static HAL_StatusTypeDef Flash_EraseNodeId(void);
-static uint8_t SelectAndSaveNodeId(void);
-static void SensorTxTask(void *argument);
-static void CANManagerTask(void *argument);
-static void DisplayTask(void *argument);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-static void UART_Print(const char *msg)
-{
-  HAL_UART_Transmit(&huart2, (uint8_t *)msg, (uint16_t)strlen(msg), HAL_MAX_DELAY);
-}
-
 int __io_putchar(int ch)
 {
   HAL_UART_Transmit(&huart2, (uint8_t *)&ch, 1, HAL_MAX_DELAY);
   return ch;
-}
-
-static HAL_StatusTypeDef Flash_ReadNodeId(uint8_t *node_id)
-{
-  uint32_t magic = *(__IO uint32_t *)FLASH_NODE_ID_ADDR;
-  uint32_t id    = *(__IO uint32_t *)(FLASH_NODE_ID_ADDR + 4U);
-
-  if (magic == FLASH_NODE_ID_MAGIC && id >= 1U && id <= NODE_COUNT)
-  {
-    *node_id = (uint8_t)id;
-    return HAL_OK;
-  }
-  return HAL_ERROR;
-}
-
-static HAL_StatusTypeDef Flash_EraseNodeId(void)
-{
-  FLASH_EraseInitTypeDef erase = {0};
-  uint32_t sector_error = 0U;
-
-  erase.TypeErase    = FLASH_TYPEERASE_SECTORS;
-  erase.VoltageRange = FLASH_VOLTAGE_RANGE_3;
-  erase.Sector       = FLASH_SECTOR_7;
-  erase.NbSectors    = 1U;
-
-  HAL_FLASH_Unlock();
-  HAL_StatusTypeDef status = HAL_FLASHEx_Erase(&erase, &sector_error);
-  HAL_FLASH_Lock();
-  return status;
-}
-
-static HAL_StatusTypeDef Flash_WriteNodeId(uint8_t node_id)
-{
-  if (Flash_EraseNodeId() != HAL_OK)
-  {
-    return HAL_ERROR;
-  }
-
-  HAL_FLASH_Unlock();
-  HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, FLASH_NODE_ID_ADDR,       FLASH_NODE_ID_MAGIC);
-  HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, FLASH_NODE_ID_ADDR + 4U,  (uint32_t)node_id);
-  HAL_FLASH_Lock();
-  return HAL_OK;
-}
-
-static uint8_t SelectAndSaveNodeId(void)
-{
-  uint8_t stored_id = 0U;
-
-  if (Flash_ReadNodeId(&stored_id) == HAL_OK)
-  {
-    printf("Stored Node ID found: Node %u\r\n", stored_id);
-    printf("Hold USER button 3s to reset, or wait...\r\n");
-
-    bool held = true;
-    for (uint32_t i = 0U; i < 30U; i++)
-    {
-      if (HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin) != GPIO_PIN_RESET)
-      {
-        held = false;
-        break;
-      }
-      HAL_Delay(100);
-    }
-
-    if (!held)
-    {
-      return stored_id;
-    }
-
-    printf("Node ID reset.\r\n");
-    Flash_EraseNodeId();
-  }
-
-  printf("Node ID selection:\r\n");
-  printf("  Press USER button 1~4 times, then wait 2s to confirm.\r\n");
-  printf("  Waiting for first press...\r\n");
-
-  while (HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin) != GPIO_PIN_RESET)
-  {
-    HAL_Delay(10);
-  }
-
-  uint8_t count = 0U;
-  uint32_t last_press = HAL_GetTick();
-
-  while (1)
-  {
-    if (HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin) == GPIO_PIN_RESET)
-    {
-      count++;
-      printf("  Press count: %u\r\n", count);
-      last_press = HAL_GetTick();
-      while (HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin) == GPIO_PIN_RESET)
-      {
-        HAL_Delay(10);
-      }
-      HAL_Delay(50);
-    }
-
-    if ((HAL_GetTick() - last_press) >= 2000U)
-    {
-      break;
-    }
-  }
-
-  if (count < 1U || count > NODE_COUNT)
-  {
-    printf("Invalid count (%u), defaulting to Node 1\r\n", count);
-    count = 1U;
-  }
-
-  if (Flash_WriteNodeId(count) == HAL_OK)
-  {
-    printf("Node %u saved to Flash.\r\n", count);
-  }
-
-  return count;
-}
-
-bool ReadSensor(void)
-{
-  return (HAL_GPIO_ReadPin(SENSOR_GPIO_Port, SENSOR_Pin) == GPIO_PIN_RESET);
 }
 /* USER CODE END 0 */
 
@@ -224,85 +91,44 @@ bool ReadSensor(void)
   */
 int main(void)
 {
-
   /* USER CODE BEGIN 1 */
-
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
-
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
 
   /* USER CODE BEGIN Init */
-
   /* USER CODE END Init */
 
   /* Configure the system clock */
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_USART2_UART_Init();
-  MX_SPI1_Init();
+
   /* USER CODE BEGIN 2 */
-  setvbuf(stdout, NULL, _IONBF, 0);
-
-  UART_Print("\r\n\r\n=== STM32 CAN Test ===\r\n");
-  UART_Print("Serial: 115200 8N1\r\n");
-  UART_Print("Waiting 2s... (open terminal, then press RESET)\r\n");
-  HAL_Delay(2000);
-
-  hmcp2515.hspi = &hspi1;
-  hmcp2515.cs_port = MCP2515_CS_GPIO_Port;
-  hmcp2515.cs_pin = MCP2515_CS_Pin;
-  hmcp2515.osc_hz = MCP2515_OSC_8MHZ;
-
-  printf("\r\nMCP2515 CAN Multi-Node (%u boards)\r\n", NODE_COUNT);
-  printf("Auto-detect crystal (8/16 MHz), bitrate: 125kbps\r\n");
-
-  if (MCP2515_AutoDetectOsc(&hmcp2515) != HAL_OK)
-  {
-    printf("MCP2515 init failed\r\n");
-    MCP2515_PrintDiag(&hmcp2515);
-    Error_Handler();
-  }
-
-  printf("Crystal: %lu MHz detected\r\n",
-         (unsigned long)(hmcp2515.osc_hz / 1000000U));
-
-  if (MCP2515_SetNormalMode(&hmcp2515) != HAL_OK)
-  {
-    printf("Normal mode failed\r\n");
-    Error_Handler();
-  }
-
-  g_node_id = SelectAndSaveNodeId();
-  printf("Node %u ready. Starting FreeRTOS...\r\n", g_node_id);
+  setvbuf(stdout, NULL, _IONBF, 0); // printf 버퍼 비우기 세팅
+  printf("\r\n=== Actuator & Relay Sequence System Start ===\r\n");
   /* USER CODE END 2 */
 
   /* Init scheduler */
   osKernelInitialize();
 
   /* USER CODE BEGIN RTOS_MUTEX */
-  spiMutex   = osMutexNew(NULL);
-  stateMutex = osMutexNew(NULL);
   /* USER CODE END RTOS_MUTEX */
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
-  /* add semaphores, ... */
   /* USER CODE END RTOS_SEMAPHORES */
 
   /* USER CODE BEGIN RTOS_TIMERS */
-  /* start timers, add new ones, ... */
   /* USER CODE END RTOS_TIMERS */
 
   /* USER CODE BEGIN RTOS_QUEUES */
-  canTxQueue = osMessageQueueNew(8U, sizeof(MCP2515_CanMsg), NULL);
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
@@ -310,45 +136,18 @@ int main(void)
   defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
-  static const osThreadAttr_t sensorTx_attr = {
-    .name       = "SensorTx",
-    .stack_size = 256U * 4U,
-    .priority   = osPriorityNormal,
-  };
-  static const osThreadAttr_t canMgr_attr = {
-    .name       = "CANMgr",
-    .stack_size = 512U * 4U,
-    .priority   = osPriorityAboveNormal,
-  };
-  static const osThreadAttr_t display_attr = {
-    .name       = "Display",
-    .stack_size = 512U * 4U,
-    .priority   = osPriorityBelowNormal,
-  };
-  osThreadNew(SensorTxTask,   NULL, &sensorTx_attr);
-  osThreadNew(CANManagerTask, NULL, &canMgr_attr);
-  osThreadNew(DisplayTask,    NULL, &display_attr);
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
-  /* add events, ... */
   /* USER CODE END RTOS_EVENTS */
 
   /* Start scheduler */
   osKernelStart();
 
   /* We should never get here as control is now taken by the scheduler */
-
-  /* Infinite loop */
-  /* USER CODE BEGIN WHILE */
   while (1)
   {
-    /* USER CODE END WHILE */
-
-    /* USER CODE BEGIN 3 */
-    HAL_Delay(1000);
   }
-  /* USER CODE END 3 */
 }
 
 /**
@@ -360,14 +159,9 @@ void SystemClock_Config(void)
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
-  /** Configure the main internal regulator output voltage
-  */
   __HAL_RCC_PWR_CLK_ENABLE();
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
 
-  /** Initializes the RCC Oscillators according to the specified parameters
-  * in the RCC_OscInitTypeDef structure.
-  */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
@@ -382,8 +176,6 @@ void SystemClock_Config(void)
     Error_Handler();
   }
 
-  /** Initializes the CPU, AHB and APB buses clocks
-  */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
@@ -398,58 +190,12 @@ void SystemClock_Config(void)
 }
 
 /**
-  * @brief SPI1 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_SPI1_Init(void)
-{
-
-  /* USER CODE BEGIN SPI1_Init 0 */
-
-  /* USER CODE END SPI1_Init 0 */
-
-  /* USER CODE BEGIN SPI1_Init 1 */
-
-  /* USER CODE END SPI1_Init 1 */
-  /* SPI1 parameter configuration*/
-  hspi1.Instance = SPI1;
-  hspi1.Init.Mode = SPI_MODE_MASTER;
-  hspi1.Init.Direction = SPI_DIRECTION_2LINES;
-  hspi1.Init.DataSize = SPI_DATASIZE_8BIT;
-  hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
-  hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
-  hspi1.Init.NSS = SPI_NSS_SOFT;
-  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_16;
-  hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
-  hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
-  hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
-  hspi1.Init.CRCPolynomial = 10;
-  if (HAL_SPI_Init(&hspi1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN SPI1_Init 2 */
-
-  /* USER CODE END SPI1_Init 2 */
-
-}
-
-/**
   * @brief USART2 Initialization Function
   * @param None
   * @retval None
   */
 static void MX_USART2_UART_Init(void)
 {
-
-  /* USER CODE BEGIN USART2_Init 0 */
-
-  /* USER CODE END USART2_Init 0 */
-
-  /* USER CODE BEGIN USART2_Init 1 */
-
-  /* USER CODE END USART2_Init 1 */
   huart2.Instance = USART2;
   huart2.Init.BaudRate = 115200;
   huart2.Init.WordLength = UART_WORDLENGTH_8B;
@@ -462,10 +208,6 @@ static void MX_USART2_UART_Init(void)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN USART2_Init 2 */
-
-  /* USER CODE END USART2_Init 2 */
-
 }
 
 /**
@@ -476,9 +218,6 @@ static void MX_USART2_UART_Init(void)
 static void MX_GPIO_Init(void)
 {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
-  /* USER CODE BEGIN MX_GPIO_Init_1 */
-
-  /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOC_CLK_ENABLE();
@@ -486,181 +225,28 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_RESET);
+  /* 1. 출력 핀 초기 상태 지정 */
+  // L298N 제어 핀(PB8, PB9, PB12, PB13) -> 처음엔 모두 정지(LOW)
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8 | GPIO_PIN_9 | GPIO_PIN_12 | GPIO_PIN_13, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8|GPIO_PIN_9, GPIO_PIN_RESET);
+  // 5V 릴레이 제어 핀(PB14) -> 평소에는 항상 ON 유지
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET);
 
-  /* [추가] pill_board 신호 전송용 PA1 초기 레벨 LOW 세팅 */
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin : B1_Pin */
-  GPIO_InitStruct.Pin = B1_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : PA4 */
-  GPIO_InitStruct.Pin = GPIO_PIN_4;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : PB0 PB1 */
-  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : PB8 PB9 */
-  GPIO_InitStruct.Pin = GPIO_PIN_8|GPIO_PIN_9;
+  /* 2. L298N 및 Relay 출력 핀 설정 (PB8, PB9, PB12, PB13, PB14) */
+  GPIO_InitStruct.Pin = GPIO_PIN_8 | GPIO_PIN_9 | GPIO_PIN_12 | GPIO_PIN_13 | GPIO_PIN_14;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  // ========================================================
-  // [추가] pill_board 연동 하드웨어 유선 제어 핀 초기화
-  // ========================================================
-  // 1. PA1: pill_board로 트리거 신호를 주는 출력 핀
-  GPIO_InitStruct.Pin = GPIO_PIN_1;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-  // 2. PA2: pill_board로부터 회전 완료 신호를 받는 입력 핀 (Pull-down)
-  GPIO_InitStruct.Pin = GPIO_PIN_2;
+  /* 3. 적외선 감지 센서 1, 2 입력 핀 설정 (PB1, PB2) */
+  GPIO_InitStruct.Pin = GPIO_PIN_1 | GPIO_PIN_2;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-  /* USER CODE BEGIN MX_GPIO_Init_2 */
-  /* CS pin must start HIGH (inactive) — CubeMX generates RESET incorrectly */
-  HAL_GPIO_WritePin(MCP2515_CS_GPIO_Port, MCP2515_CS_Pin, GPIO_PIN_SET);
-
-  /* Re-apply pull-ups for INT (PB0) and SENSOR (PB1) */
-  GPIO_InitStruct.Pin  = MCP2515_INT_Pin | SENSOR_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  GPIO_InitStruct.Pull = GPIO_PULLUP; // 풀업 저항 적용 (평소 HIGH, 감지 시 LOW 상태 대비)
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-  /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
-static void SensorTxTask(void *argument)
-{
-  (void)argument;
-  bool     last_sensor  = false;
-  uint32_t last_tx_tick = 0U;
-
-  osMutexAcquire(stateMutex, osWaitForever);
-  node_states[g_node_id].valid = true;
-  osMutexRelease(stateMutex);
-
-  for (;;)
-  {
-    bool     sensor_now = ReadSensor();
-    uint32_t now        = osKernelGetTickCount();
-
-    osMutexAcquire(stateMutex, osWaitForever);
-    node_states[g_node_id].sensor = sensor_now;
-    osMutexRelease(stateMutex);
-
-    // [유선 연동 변경점] 센서 감지 상태를 pill_board용 유선 통신 핀(PA1)에 실시간 매핑
-    if (sensor_now) {
-      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_SET); // pill_board로 트리거 출력 On
-    } else {
-      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_RESET); // pill_board 트리거 Off
-    }
-
-    if (sensor_now != last_sensor || (now - last_tx_tick) >= 200U)
-    {
-      last_sensor  = sensor_now;
-      last_tx_tick = now;
-
-      MCP2515_CanMsg msg = {
-          .id       = CAN_ID_BASE + g_node_id,
-          .dlc      = 1U,
-          .data     = {sensor_now ? 0x01U : 0x00U},
-          .extended = false,
-      };
-      osMessageQueuePut(canTxQueue, &msg, 0U, 0U);
-    }
-    osDelay(50U);
-  }
-}
-
-static void CANManagerTask(void *argument)
-{
-  (void)argument;
-
-  for (;;)
-  {
-    MCP2515_CanMsg tx_msg;
-    if (osMessageQueueGet(canTxQueue, &tx_msg, NULL, 0U) == osOK)
-    {
-      osMutexAcquire(spiMutex, osWaitForever);
-      if (MCP2515_Send(&hmcp2515, &tx_msg) != HAL_OK)
-      {
-        MCP2515_RecoverBus(&hmcp2515);
-      }
-      osMutexRelease(spiMutex);
-    }
-
-    MCP2515_CanMsg rx_msg = {0};
-    osMutexAcquire(spiMutex, osWaitForever);
-    HAL_StatusTypeDef rx_status = MCP2515_Receive(&hmcp2515, &rx_msg, 5U);
-    osMutexRelease(spiMutex);
-
-    if (rx_status == HAL_OK)
-    {
-      uint32_t src = rx_msg.id - CAN_ID_BASE;
-      if (src >= 1U && src <= NODE_COUNT && src != (uint32_t)g_node_id && rx_msg.dlc >= 1U)
-      {
-        osMutexAcquire(stateMutex, osWaitForever);
-        node_states[src].sensor = (rx_msg.data[0] != 0U);
-        node_states[src].valid  = true;
-        osMutexRelease(stateMutex);
-      }
-    }
-
-    osDelay(5U);
-  }
-}
-
-static void DisplayTask(void *argument)
-{
-  (void)argument;
-  NodeState snapshot[NODE_COUNT + 1U];
-
-  for (;;)
-  {
-    osMutexAcquire(stateMutex, osWaitForever);
-    for (uint8_t i = 0U; i <= NODE_COUNT; i++)
-      snapshot[i] = node_states[i];
-    osMutexRelease(stateMutex);
-
-    for (uint8_t i = 1U; i <= NODE_COUNT; i++)
-    {
-      const char *label;
-      if (!snapshot[i].valid)
-        label = "---";
-      else
-        label = snapshot[i].sensor ? "DETECTED" : "CLEAR";
-
-      if (i == 1U)
-        printf("N%u[%-8s]", i, label);
-      else
-        printf(" N%u[%-8s]", i, label);
-    }
-    printf("\r\n");
-
-    osDelay(500U);
-  }
-}
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN Header_StartDefaultTask */
@@ -672,46 +258,76 @@ static void DisplayTask(void *argument)
 /* USER CODE END Header_StartDefaultTask */
 void StartDefaultTask(void *argument)
 {
-  /* USER CODE BEGIN 5 */
-  bool last_state = false;
-  bool last_pill_done = false;
+  (void)argument;
+
+  /* 시스템 초기 상태 리셋 보장 */
+  RELAY_ON();
+  ACT1_STOP();
+  ACT2_STOP();
 
   for (;;)
   {
-    bool detected = ReadSensor();
-
-    if (detected != last_state)
+    // ----------------------------------------------------
+    // 시나리오 1: 1번 적외선 센서 감지 시
+    // ----------------------------------------------------
+    if (SENSOR1_DETECTED())
     {
-      last_state = detected;
+      printf("[SEQ] Sensor 1 Active! -> Relay OFF, Actuator 1 Moving.\r\n");
 
-      if (detected)
+      RELAY_OFF();          // 1. 5V 릴레이 OFF
+      osDelay(50);          // 회로 안정화를 위한 아주 짧은 지연
+
+      ACT1_FORWARD();       // 2. 1번 액추에이터 2초 전진
+      osDelay(2000);
+
+      ACT1_BACKWARD();      // 3. 1번 액추에이터 3초 후진
+      osDelay(3000);
+
+      ACT1_STOP();          // 4. 1번 액추에이터 정지
+      osDelay(50);
+
+      RELAY_ON();           // 5. 5V 릴레이 다시 ON
+      printf("[SEQ] Actuator 1 Completed! -> Relay ON.\r\n");
+
+      // 센서 앞에 물체가 계속 머물러 있어 루프가 바로 다시 도는 것을 막기 위한 디바운스 대기
+      while(SENSOR1_DETECTED())
       {
-        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);
-        printf("[ACT1] Forward (obstacle detected) -> Wire Signal Sent to Pill Board\r\n");
-      }
-      else
-      {
-        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_RESET);
-        printf("[ACT1] Backward (no obstacle)\r\n");
+        osDelay(100);
       }
     }
 
-    // [유선 연동 변경점] pill_board로부터 모터 회전 완료 신호(PA2) 수신 체크
-    bool pill_done_now = (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_2) == GPIO_PIN_SET);
-
-    if (pill_done_now && !last_pill_done)
+    // ----------------------------------------------------
+    // 시나리오 2: 2번 적외선 센서 감지 시
+    // ----------------------------------------------------
+    else if (SENSOR2_DETECTED())
     {
-      // 완료 신호가 들어오는 순간(Rising Edge) 캐치
-      printf("[INTERLOCK] Pill Board completed 60 deg rotation successfully!\r\n");
+      printf("[SEQ] Sensor 2 Active! -> Relay OFF, Actuator 2 Moving.\r\n");
 
-      // 안정적인 인터록 해제를 위해 트리거 핀(PA1)을 일시적으로 초기화
-      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_RESET);
+      RELAY_OFF();          // 1. 5V 릴레이 OFF
+      osDelay(50);
+
+      ACT2_FORWARD();       // 2. 2번 액추에이터 8초 전진
+      osDelay(8000);
+
+      ACT2_BACKWARD();      // 3. 2번 액추에이터 9초 후진
+      osDelay(9000);
+
+      ACT2_STOP();          // 4. 2번 액추에이터 정지
+      osDelay(50);
+
+      RELAY_ON();           // 5. 5V 릴레이 다시 ON
+      printf("[SEQ] Actuator 2 Completed! -> Relay ON.\r\n");
+
+      // 센서 2번 해제 대기
+      while(SENSOR2_DETECTED())
+      {
+        osDelay(100);
+      }
     }
-    last_pill_done = pill_done_now;
 
+    // 센서가 아무것도 감지하지 않는 평시 상태 제어 (20ms 주기로 스캔하여 CPU 반환)
     osDelay(20);
   }
-  /* USER CODE END 5 */
 }
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
@@ -729,6 +345,7 @@ void Error_Handler(void)
   {
   }
 }
+
 #ifdef USE_FULL_ASSERT
 void assert_failed(uint8_t *file, uint32_t line)
 {

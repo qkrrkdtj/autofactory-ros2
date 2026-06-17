@@ -73,12 +73,6 @@ bool ReadSensor(void);
 #define USART_TX_GPIO_Port GPIOA
 #define USART_RX_Pin GPIO_PIN_3
 #define USART_RX_GPIO_Port GPIOA
-#define SENSOR2_Pin GPIO_PIN_2
-#define SENSOR2_GPIO_Port GPIOB
-#define ACT2_IN3_Pin GPIO_PIN_12
-#define ACT2_IN3_GPIO_Port GPIOB
-#define ACT2_IN4_Pin GPIO_PIN_13
-#define ACT2_IN4_GPIO_Port GPIOB
 #define TMS_Pin GPIO_PIN_13
 #define TMS_GPIO_Port GPIOA
 #define TCK_Pin GPIO_PIN_14

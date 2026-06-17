@@ -2,39 +2,55 @@
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : Main program body (Dual Actuator & Relay Control)
+  * @brief          : Main program body for L298N & Relay Sequence Control
+  ******************************************************************************
+  * @attention
+  *
+  * Copyright (c) 2026 STMicroelectronics.
+  * All rights reserved.
+  *
   ******************************************************************************
   */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "cmsis_os.h"
-
-/* Private includes ----------------------------------------------------------*/
-/* USER CODE BEGIN Includes */
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
+
+/* Private includes ----------------------------------------------------------*/
+/* USER CODE BEGIN Includes */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-/* 액추에이터 상태 정의용 열거형 */
-typedef enum {
-    STATE_IDLE = 0,
-    STATE_FORWARD,
-    STATE_DEADBAND, // 역기전력 방지용 미세 정지 시간
-    STATE_BACKWARD
-} ActuatorState;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+/* 센서 감지 매크로 정의 (일반적인 적외선 센서는 감지 시 LOW 출력(NPN형) 기준) */
+/* 만약 감지 시 HIGH가 출력되는 센서라면 == GPIO_PIN_SET 으로 수정하세요. */
+#define SENSOR1_DETECTED() (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_1) == GPIO_PIN_RESET)
+#define SENSOR2_DETECTED() (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_2) == GPIO_PIN_RESET)
+
+/* 5V 릴레이 제어 편의 기능 (S: PB14) */
+#define RELAY_ON()        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET)
+#define RELAY_OFF()       HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET)
+
+/* 1번 액추에이터 제어 (IN1: PB8, IN2: PB9) */
+#define ACT1_FORWARD()    do { HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_SET);   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_RESET); } while(0)
+#define ACT1_BACKWARD()   do { HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_RESET); HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_SET);   } while(0)
+#define ACT1_STOP()       do { HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_RESET); HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_RESET); } while(0)
+
+/* 2번 액추에이터 제어 (IN3: PB12, IN4: PB13) */
+#define ACT2_FORWARD()    do { HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_SET);   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_13, GPIO_PIN_RESET); } while(0)
+#define ACT2_BACKWARD()   do { HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_RESET); HAL_GPIO_WritePin(GPIOB, GPIO_PIN_13, GPIO_PIN_SET);   } while(0)
+#define ACT2_STOP()       do { HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_RESET); HAL_GPIO_WritePin(GPIOB, GPIO_PIN_13, GPIO_PIN_RESET); } while(0)
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -44,11 +60,11 @@ UART_HandleTypeDef huart2;
 osThreadId_t defaultTaskHandle;
 const osThreadAttr_t defaultTask_attributes = {
   .name = "defaultTask",
-  .stack_size = 256 * 4, // printf 안정성을 위해 스택 크기를 1024바이트로 확장
+  .stack_size = 512 * 4, // 시퀀스 처리 및 printf 출력을 위해 스택 확보
   .priority = (osPriority_t) osPriorityNormal,
 };
-/* USER CODE BEGIN PV */
 
+/* USER CODE BEGIN PV */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -58,8 +74,6 @@ static void MX_USART2_UART_Init(void);
 void StartDefaultTask(void *argument);
 
 /* USER CODE BEGIN PFP */
-bool ReadSensor1(void);
-bool ReadSensor2(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -68,18 +82,6 @@ int __io_putchar(int ch)
 {
   HAL_UART_Transmit(&huart2, (uint8_t *)&ch, 1, HAL_MAX_DELAY);
   return ch;
-}
-
-/* 1호기 센서 읽기 (PB1) */
-bool ReadSensor1(void)
-{
-  return (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_1) == GPIO_PIN_RESET);
-}
-
-/* 2호기 센서 읽기 (PB2) */
-bool ReadSensor2(void)
-{
-  return (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_2) == GPIO_PIN_RESET);
 }
 /* USER CODE END 0 */
 
@@ -90,33 +92,28 @@ bool ReadSensor2(void)
 int main(void)
 {
   /* USER CODE BEGIN 1 */
-
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
-
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
 
   /* USER CODE BEGIN Init */
-
   /* USER CODE END Init */
 
   /* Configure the system clock */
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_USART2_UART_Init();
-  /* USER CODE BEGIN 2 */
-  setvbuf(stdout, NULL, _IONBF, 0);
 
-  printf("\r\n\r\n=== Dual Actuator & Relay Control System ===\r\n");
-  printf("System Initialized. Starting FreeRTOS Scheduler...\r\n");
+  /* USER CODE BEGIN 2 */
+  setvbuf(stdout, NULL, _IONBF, 0); // printf 버퍼 비우기 세팅
+  printf("\r\n=== Actuator & Relay Sequence System Start ===\r\n");
   /* USER CODE END 2 */
 
   /* Init scheduler */
@@ -148,15 +145,9 @@ int main(void)
   osKernelStart();
 
   /* We should never get here as control is now taken by the scheduler */
-  /* Infinite loop */
-  /* USER CODE BEGIN WHILE */
   while (1)
   {
-    /* USER CODE END WHILE */
-
-    /* USER CODE BEGIN 3 */
   }
-  /* USER CODE END 3 */
 }
 
 /**
@@ -173,7 +164,8 @@ void SystemClock_Config(void)
 
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
-  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT; //  'W'를 'SI'로 수정!  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
   RCC_OscInitStruct.PLL.PLLM = 16;
   RCC_OscInitStruct.PLL.PLLN = 336;
@@ -228,29 +220,34 @@ static void MX_GPIO_Init(void)
   GPIO_InitTypeDef GPIO_InitStruct = {0};
 
   /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
-  /* 모터 출력 핀 초기화 (정지 상태: LOW) */
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8|GPIO_PIN_9|GPIO_PIN_12|GPIO_PIN_13, GPIO_PIN_RESET);
+  /* 1. 출력 핀 초기 상태 지정 */
+  // L298N 제어 핀(PB8, PB9, PB12, PB13) -> 처음엔 모두 정지(LOW)
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8 | GPIO_PIN_9 | GPIO_PIN_12 | GPIO_PIN_13, GPIO_PIN_RESET);
 
-  /* 5V 릴레이 초기 상태 설정 (평소 가동 상태: HIGH) */
+  // 5V 릴레이 제어 핀(PB14) -> 평소에는 항상 ON 유지
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET);
 
-  /* L298N 및 릴레이 제어용 출력 핀 설정 (PB8, PB9, PB12, PB13, PB14) */
-  GPIO_InitStruct.Pin = GPIO_PIN_8|GPIO_PIN_9|GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14;
+  /* 2. L298N 및 Relay 출력 핀 설정 (PB8, PB9, PB12, PB13, PB14) */
+  GPIO_InitStruct.Pin = GPIO_PIN_8 | GPIO_PIN_9 | GPIO_PIN_12 | GPIO_PIN_13 | GPIO_PIN_14;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  /* 적외선 센서 입력 핀 설정 (PB1, PB2) -> 풀업 활성화 */
-  GPIO_InitStruct.Pin = GPIO_PIN_1|GPIO_PIN_2;
+  /* 3. 적외선 감지 센서 1, 2 입력 핀 설정 (PB1, PB2) */
+  GPIO_InitStruct.Pin = GPIO_PIN_1 | GPIO_PIN_2;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  GPIO_InitStruct.Pull = GPIO_PULLUP; // 풀업 저항 적용 (평소 HIGH, 감지 시 LOW 상태 대비)
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 }
+
+/* USER CODE BEGIN 4 */
+/* USER CODE END 4 */
 
 /* USER CODE BEGIN Header_StartDefaultTask */
 /**
@@ -261,152 +258,78 @@ static void MX_GPIO_Init(void)
 /* USER CODE END Header_StartDefaultTask */
 void StartDefaultTask(void *argument)
 {
-  /* USER CODE BEGIN 5 */
+  (void)argument;
 
-  // 1호기 변수 (8초 전진 / 9초 후진)
-  ActuatorState state1 = STATE_IDLE;
-  uint32_t timer1 = 0;
-  bool last_sensor1 = false;
-
-  // 2호기 변수 (3초 전진 / 4초 후진)
-  ActuatorState state2 = STATE_IDLE;
-  uint32_t timer2 = 0;
-  bool last_sensor2 = false;
-
-  const uint32_t TICK_MS = 10; // 10ms 단위 정밀 제어 루프
+  /* 시스템 초기 상태 리셋 보장 */
+  RELAY_ON();
+  ACT1_STOP();
+  ACT2_STOP();
 
   for (;;)
   {
-    bool current_sensor1 = ReadSensor1();
-    bool current_sensor2 = ReadSensor2();
-
-    // ================= [ 1호기 상태 제어 (8초 전진 / 9초 후진) ] =================
-    switch (state1)
+    // ----------------------------------------------------
+    // 시나리오 1: 1번 적외선 센서 감지 시
+    // ----------------------------------------------------
+    if (SENSOR1_DETECTED())
     {
-      case STATE_IDLE:
-        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_RESET);
-        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_RESET);
+      printf("[SEQ] Sensor 1 Active! -> Relay OFF, Actuator 1 Moving.\r\n");
 
-        if (current_sensor1 && !last_sensor1) // 포지티브 에지 트리거 (감지 순간)
-        {
-          state1 = STATE_FORWARD;
-          timer1 = 8000; // 8000ms = 8초
-          printf("[ACT1] Obstacle detected! Forward for 8 seconds.\r\n");
-        }
-        break;
+      RELAY_OFF();          // 1. 5V 릴레이 OFF
+      osDelay(50);          // 회로 안정화를 위한 아주 짧은 지연
 
-      case STATE_FORWARD:
-        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_SET);   // IN1 HIGH
-        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_RESET); // IN2 LOW
+      ACT1_FORWARD();       // 2. 1번 액추에이터 2초 전진
+      osDelay(2000);
 
-        if (timer1 >= TICK_MS) timer1 -= TICK_MS;
-        else {
-          // 전진 끝 -> 정지 브레이크 (데드타임)
-          HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_RESET);
-          HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_RESET);
-          state1 = STATE_DEADBAND;
-          timer1 = 200; // 0.2초 대기
-        }
-        break;
+      ACT1_BACKWARD();      // 3. 1번 액추에이터 3초 후진
+      osDelay(3000);
 
-      case STATE_DEADBAND:
-        if (timer1 >= TICK_MS) timer1 -= TICK_MS;
-        else {
-          state1 = STATE_BACKWARD;
-          timer1 = 9000; // 9000ms = 9초
-          printf("[ACT1] Forward complete. Backward for 9 seconds.\r\n");
-        }
-        break;
+      ACT1_STOP();          // 4. 1번 액추에이터 정지
+      osDelay(50);
 
-      case STATE_BACKWARD:
-        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_RESET); // IN1 LOW
-        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_SET);   // IN2 HIGH
+      RELAY_ON();           // 5. 5V 릴레이 다시 ON
+      printf("[SEQ] Actuator 1 Completed! -> Relay ON.\r\n");
 
-        if (timer1 >= TICK_MS) timer1 -= TICK_MS;
-        else {
-          HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_RESET);
-          HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_RESET);
-          state1 = STATE_IDLE;
-          printf("[ACT1] Backward complete. Cycle finished.\r\n");
-        }
-        break;
-    }
-    last_sensor1 = current_sensor1;
-
-
-    // ================= [ 2호기 상태 제어 (3초 전진 / 4초 후진) ] =================
-    switch (state2)
-    {
-      case STATE_IDLE:
-        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_RESET);
-        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_13, GPIO_PIN_RESET);
-
-        if (current_sensor2 && !last_sensor2) // 포지티브 에지 트리거 (감지 순간)
-        {
-          state2 = STATE_FORWARD;
-          timer2 = 3000; // 3000ms = 3초
-          printf("[ACT2] Obstacle detected! Forward for 3 seconds.\r\n");
-        }
-        break;
-
-      case STATE_FORWARD:
-        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_SET);   // IN3 HIGH
-        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_13, GPIO_PIN_RESET); // IN4 LOW
-
-        if (timer2 >= TICK_MS) timer2 -= TICK_MS;
-        else {
-          // 전진 끝 -> 정지 브레이크 (데드타임)
-          HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_RESET);
-          HAL_GPIO_WritePin(GPIOB, GPIO_PIN_13, GPIO_PIN_RESET);
-          state2 = STATE_DEADBAND;
-          timer2 = 200; // 0.2초 대기
-        }
-        break;
-
-      case STATE_DEADBAND:
-        if (timer2 >= TICK_MS) timer2 -= TICK_MS;
-        else {
-          state2 = STATE_BACKWARD;
-          timer2 = 4000; // 4000ms = 4초
-          printf("[ACT2] Forward complete. Backward for 4 seconds.\r\n");
-        }
-        break;
-
-      case STATE_BACKWARD:
-        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_RESET); // IN3 LOW
-        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_13, GPIO_PIN_SET);   // IN4 HIGH
-
-        if (timer2 >= TICK_MS) timer2 -= TICK_MS;
-        else {
-          HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_RESET);
-          HAL_GPIO_WritePin(GPIOB, GPIO_PIN_13, GPIO_PIN_RESET);
-          state2 = STATE_IDLE;
-          printf("[ACT2] Backward complete. Cycle finished.\r\n");
-        }
-        break;
-    }
-    last_sensor2 = current_sensor2;
-
-
-    // ================= [ 5V 릴레이 연동 제어 로직 ] =================
-    // 1호기나 2호기 중 하나라도 대기(IDLE) 상태가 아니면 (= 움직이고 있으면)
-    if (state1 != STATE_IDLE || state2 != STATE_IDLE)
-    {
-      HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET); // 릴레이 OFF (멈춤)
-    }
-    else
-    {
-      HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET);   // 릴레이 ON (평소 작동)
+      // 센서 앞에 물체가 계속 머물러 있어 루프가 바로 다시 도는 것을 막기 위한 디바운스 대기
+      while(SENSOR1_DETECTED())
+      {
+        osDelay(100);
+      }
     }
 
-    osDelay(TICK_MS); // 10ms 단위 태스크 양보 및 딜레이
+    // ----------------------------------------------------
+    // 시나리오 2: 2번 적외선 센서 감지 시
+    // ----------------------------------------------------
+    else if (SENSOR2_DETECTED())
+    {
+      printf("[SEQ] Sensor 2 Active! -> Relay OFF, Actuator 2 Moving.\r\n");
+
+      RELAY_OFF();          // 1. 5V 릴레이 OFF
+      osDelay(50);
+
+      ACT2_FORWARD();       // 2. 2번 액추에이터 8초 전진
+      osDelay(8000);
+
+      ACT2_BACKWARD();      // 3. 2번 액추에이터 9초 후진
+      osDelay(9000);
+
+      ACT2_STOP();          // 4. 2번 액추에이터 정지
+      osDelay(50);
+
+      RELAY_ON();           // 5. 5V 릴레이 다시 ON
+      printf("[SEQ] Actuator 2 Completed! -> Relay ON.\r\n");
+
+      // 센서 2번 해제 대기
+      while(SENSOR2_DETECTED())
+      {
+        osDelay(100);
+      }
+    }
+
+    // 센서가 아무것도 감지하지 않는 평시 상태 제어 (20ms 주기로 스캔하여 CPU 반환)
+    osDelay(20);
   }
-  /* USER CODE END 5 */
 }
 
-/**
-  * @brief  Period elapsed callback in non blocking mode
-  */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
   if (htim->Instance == TIM11)
@@ -415,9 +338,6 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   }
 }
 
-/**
-  * @brief  This function is executed in case of error occurrence.
-  */
 void Error_Handler(void)
 {
   __disable_irq();
@@ -425,3 +345,9 @@ void Error_Handler(void)
   {
   }
 }
+
+#ifdef USE_FULL_ASSERT
+void assert_failed(uint8_t *file, uint32_t line)
+{
+}
+#endif /* USE_FULL_ASSERT */
