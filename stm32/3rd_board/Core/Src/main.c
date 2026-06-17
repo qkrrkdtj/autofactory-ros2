@@ -30,7 +30,6 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 /* 센서 감지 매크로 정의 (일반적인 적외선 센서는 감지 시 LOW 출력(NPN형) 기준) */
-/* 만약 감지 시 HIGH가 출력되는 센서라면 == GPIO_PIN_SET 으로 수정하세요. */
 #define SENSOR1_DETECTED() (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_1) == GPIO_PIN_RESET)
 #define SENSOR2_DETECTED() (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_2) == GPIO_PIN_RESET)
 
@@ -60,7 +59,7 @@ UART_HandleTypeDef huart2;
 osThreadId_t defaultTaskHandle;
 const osThreadAttr_t defaultTask_attributes = {
   .name = "defaultTask",
-  .stack_size = 512 * 4, // 시퀀스 처리 및 printf 출력을 위해 스택 확보
+  .stack_size = 512 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
 
@@ -95,7 +94,6 @@ int main(void)
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
-  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
 
   /* USER CODE BEGIN Init */
@@ -112,39 +110,19 @@ int main(void)
   MX_USART2_UART_Init();
 
   /* USER CODE BEGIN 2 */
-  setvbuf(stdout, NULL, _IONBF, 0); // printf 버퍼 비우기 세팅
+  setvbuf(stdout, NULL, _IONBF, 0);
   printf("\r\n=== Actuator & Relay Sequence System Start ===\r\n");
   /* USER CODE END 2 */
 
   /* Init scheduler */
   osKernelInitialize();
 
-  /* USER CODE BEGIN RTOS_MUTEX */
-  /* USER CODE END RTOS_MUTEX */
-
-  /* USER CODE BEGIN RTOS_SEMAPHORES */
-  /* USER CODE END RTOS_SEMAPHORES */
-
-  /* USER CODE BEGIN RTOS_TIMERS */
-  /* USER CODE END RTOS_TIMERS */
-
-  /* USER CODE BEGIN RTOS_QUEUES */
-  /* USER CODE END RTOS_QUEUES */
-
   /* Create the thread(s) */
-  /* creation of defaultTask */
   defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
-
-  /* USER CODE BEGIN RTOS_THREADS */
-  /* USER CODE END RTOS_THREADS */
-
-  /* USER CODE BEGIN RTOS_EVENTS */
-  /* USER CODE END RTOS_EVENTS */
 
   /* Start scheduler */
   osKernelStart();
 
-  /* We should never get here as control is now taken by the scheduler */
   while (1)
   {
   }
@@ -226,11 +204,8 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /* 1. 출력 핀 초기 상태 지정 */
-  // L298N 제어 핀(PB8, PB9, PB12, PB13) -> 처음엔 모두 정지(LOW)
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8 | GPIO_PIN_9 | GPIO_PIN_12 | GPIO_PIN_13, GPIO_PIN_RESET);
-
-  // 5V 릴레이 제어 핀(PB14) -> 평소에는 항상 ON 유지
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET); // 평소 릴레이 ON
 
   /* 2. L298N 및 Relay 출력 핀 설정 (PB8, PB9, PB12, PB13, PB14) */
   GPIO_InitStruct.Pin = GPIO_PIN_8 | GPIO_PIN_9 | GPIO_PIN_12 | GPIO_PIN_13 | GPIO_PIN_14;
@@ -242,7 +217,7 @@ static void MX_GPIO_Init(void)
   /* 3. 적외선 감지 센서 1, 2 입력 핀 설정 (PB1, PB2) */
   GPIO_InitStruct.Pin = GPIO_PIN_1 | GPIO_PIN_2;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_PULLUP; // 풀업 저항 적용 (평소 HIGH, 감지 시 LOW 상태 대비)
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 }
 
@@ -275,21 +250,22 @@ void StartDefaultTask(void *argument)
       printf("[SEQ] Sensor 1 Active! -> Relay OFF, Actuator 1 Moving.\r\n");
 
       RELAY_OFF();          // 1. 5V 릴레이 OFF
-      osDelay(50);          // 회로 안정화를 위한 아주 짧은 지연
+      osDelay(50);
 
       ACT1_FORWARD();       // 2. 1번 액추에이터 2초 전진
       osDelay(2000);
 
-      ACT1_BACKWARD();      // 3. 1번 액추에이터 3초 후진
-      osDelay(3000);
+      ACT1_BACKWARD();      // 3. 1번 액추에이터 5초 후진 (기존보다 3초 더 후진)
+      osDelay(5000);
 
       ACT1_STOP();          // 4. 1번 액추에이터 정지
       osDelay(50);
 
       RELAY_ON();           // 5. 5V 릴레이 다시 ON
-      printf("[SEQ] Actuator 1 Completed! -> Relay ON.\r\n");
+      printf("[SEQ] Actuator 1 Completed! -> Relay ON for 0.5s.\r\n");
+      osDelay(500);         // 6. 릴레이 ON 상태를 0.5초 동안 확실히 유지
 
-      // 센서 앞에 물체가 계속 머물러 있어 루프가 바로 다시 도는 것을 막기 위한 디바운스 대기
+      // 센서 앞에 물체가 계속 머물러 있어 루프가 바로 다시 도는 것을 막기 위한 대기
       while(SENSOR1_DETECTED())
       {
         osDelay(100);
@@ -309,14 +285,15 @@ void StartDefaultTask(void *argument)
       ACT2_FORWARD();       // 2. 2번 액추에이터 8초 전진
       osDelay(8000);
 
-      ACT2_BACKWARD();      // 3. 2번 액추에이터 9초 후진
-      osDelay(9000);
+      ACT2_BACKWARD();      // 3. 2번 액추에이터 11초 후진 (기존보다 3초 더 후진)
+      osDelay(11000);
 
       ACT2_STOP();          // 4. 2번 액추에이터 정지
       osDelay(50);
 
       RELAY_ON();           // 5. 5V 릴레이 다시 ON
-      printf("[SEQ] Actuator 2 Completed! -> Relay ON.\r\n");
+      printf("[SEQ] Actuator 2 Completed! -> Relay ON for 0.5s.\r\n");
+      osDelay(500);         // 6. 릴레이 ON 상태를 0.5초 동안 확실히 유지
 
       // 센서 2번 해제 대기
       while(SENSOR2_DETECTED())
@@ -325,7 +302,7 @@ void StartDefaultTask(void *argument)
       }
     }
 
-    // 센서가 아무것도 감지하지 않는 평시 상태 제어 (20ms 주기로 스캔하여 CPU 반환)
+    // 센서 스캔 주기 유지 (20ms 주기로 CPU 반환)
     osDelay(20);
   }
 }
