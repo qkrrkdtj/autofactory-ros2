@@ -5,9 +5,11 @@ from rclpy.executors import MultiThreadedExecutor
 from action_msgs.msg import GoalStatus
 from server_pkg.modi_mission_manager import MissionManager, start_mission
 from server_pkg.omx_link import OmxConnection
+from server_pkg.ssh_launcher import launch_all, kill_all
 import threading
 import time
 import sys
+import os
 
 from nav2_msgs.action import NavigateToPose
 
@@ -75,16 +77,24 @@ class ActionProxy:
 # ==========================================
 # 2. Flask 앱 — 시작 버튼 + A,C 신호 수신
 # ==========================================
-def create_flask_app(start_event: threading.Event, mission_holder: dict):
+def create_flask_app(start_event: threading.Event, mission_holder: dict, ssh_ready_event: threading.Event):
     app = Flask(__name__)
 
     @app.route('/')
     def index():
-        with open('/tmp/dashboard.html', 'r') as f:
+        html_path = os.path.join(os.path.dirname(__file__), 'dashboard.html')
+        with open(html_path, 'r') as f:
             return f.read()
 
+    @app.route('/ready')
+    def ready():
+        # 프론트에서 폴링으로 준비 여부 확인
+        return jsonify({'ready': ssh_ready_event.is_set()})
+    
     @app.route('/start', methods=['POST'])
     def start():
+        if not ssh_ready_event.is_set():
+            return jsonify({'status': 'error', 'message': '아직 기기 준비 중입니다!'}), 400
         if not start_event.is_set():
             start_event.set()
             return jsonify({'status': 'ok', 'message': '미션 시작!'})
@@ -106,112 +116,6 @@ def create_flask_app(start_event: threading.Event, mission_holder: dict):
 
     return app
 
-
-# ==========================================
-# 3. HTML 대시보드 생성
-# ==========================================
-def write_dashboard_html():
-    html = """<!DOCTYPE html>
-<html lang="ko">
-<head>
-  <meta charset="UTF-8">
-  <title>🤖 로봇 미션 대시보드</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: 'Segoe UI', sans-serif;
-      background: #0f172a;
-      color: #e2e8f0;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      min-height: 100vh;
-      gap: 24px;
-    }
-    h1 { font-size: 1.8rem; letter-spacing: 0.05em; color: #7dd3fc; }
-    .card {
-      background: #1e293b;
-      border: 1px solid #334155;
-      border-radius: 16px;
-      padding: 32px 48px;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 16px;
-      width: 380px;
-    }
-    .label { font-size: 0.85rem; color: #94a3b8; letter-spacing: 0.08em; }
-    button {
-      width: 100%;
-      padding: 14px;
-      border: none;
-      border-radius: 10px;
-      font-size: 1.1rem;
-      font-weight: 700;
-      cursor: pointer;
-      transition: opacity 0.2s, transform 0.1s;
-    }
-    button:active { transform: scale(0.97); }
-    button:disabled { opacity: 0.4; cursor: not-allowed; }
-    #btn-start  { background: #22c55e; color: #fff; }
-    .signal-btn { background: #f59e0b; color: #fff; flex: 1; }
-    .btn-group { display: flex; gap: 12px; width: 100%; }
-    #status {
-      font-size: 0.9rem;
-      color: #64748b;
-      min-height: 1.2em;
-      text-align: center;
-    }
-    .divider { width: 100%; border: none; border-top: 1px solid #334155; }
-  </style>
-</head>
-<body>
-  <h1>🤖 로봇 미션 대시보드</h1>
-
-  <div class="card">
-    <span class="label">MISSION CONTROL</span>
-    <button id="btn-start" onclick="sendStart()">▶ 미션 시작</button>
-
-    <hr class="divider">
-
-    <span class="label">EXTERNAL SIGNALS</span>
-    <div class="btn-group">
-      <button class="signal-btn" onclick="sendSignal('A')" disabled>✅ A 해제</button>
-      <button class="signal-btn" onclick="sendSignal('C')" disabled>✅ C 해제</button>
-    </div>
-
-    <p id="status">대기 중...</p>
-  </div>
-
-  <script>
-    async function sendStart() {
-      document.getElementById('btn-start').disabled = true;
-      const res = await fetch('/start', { method: 'POST' });
-      const data = await res.json();
-      setStatus(data.message, '#22c55e');
-      
-      // 시작 후 A, C 신호 버튼 모두 활성화
-      document.querySelectorAll('.signal-btn').forEach(btn => btn.disabled = false);
-    }
-
-    async function sendSignal(wp) {
-      const res = await fetch(`/signal/${wp}`, { method: 'POST' });
-      const data = await res.json();
-      setStatus(data.message, '#f59e0b');
-    }
-
-    function setStatus(msg, color) {
-      const el = document.getElementById('status');
-      el.textContent = msg;
-      el.style.color = color;
-    }
-  </script>
-</body>
-</html>
-"""
-    with open('/tmp/dashboard.html', 'w') as f:
-        f.write(html)
 
 # ==========================================
 # 4. 키보드 입력 스레드 (Enter → C 신호)
@@ -275,11 +179,11 @@ def main(args=None):
 
     # ── 시작 이벤트 & 미션 홀더 ──
     start_event   = threading.Event()   # HTML 버튼이 set()
+    ssh_ready_event = threading.Event() 
     mission_holder = {'mission': None}  # 미션 객체 공유
 
     # ── Flask 서버 스레드 ──
-    write_dashboard_html()
-    flask_app = create_flask_app(start_event, mission_holder)
+    flask_app = create_flask_app(start_event, mission_holder, ssh_ready_event)
     flask_thread = threading.Thread(
         target=lambda: flask_app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False),
         daemon=True
@@ -287,6 +191,10 @@ def main(args=None):
     flask_thread.start()
     print("\n🌐 대시보드: http://localhost:5000")
 
+    print("SSH launch_all 호출 전")
+    launch_all(on_all_ready=lambda: ssh_ready_event.set())
+    print("SSH launch_all 호출 후")
+    
     # ── 키보드 리스너 스레드 ──
     kb_thread = threading.Thread(
         target=keyboard_listener, args=(mission_holder,), daemon=True
@@ -338,6 +246,7 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
+        kill_all()  # ← 추가
         print("\n안전하게 자원을 해제합니다...")
         for system in domain_systems:
             system['exc'].shutdown()
