@@ -72,18 +72,6 @@
   </div>
 
   <script>
-  
-    async function checkReady() {
-        const res = await fetch('/ready');
-        const data = await res.json();
-        if (data.ready) {
-            document.getElementById('btn-start').disabled = false;
-            setStatus('모든 기기 준비 완료! 시작 버튼을 누르세요.', '#22c55e');
-        } else {
-            setStatus('기기 준비 중...', '#94a3b8');
-            setTimeout(checkReady, 1000);
-        }
-    }
     
     async function sendStart() {
       document.getElementById('btn-start').disabled = true;
@@ -107,7 +95,14 @@
       el.style.color = color;
     }
     
-    checkReady();  // 페이지 로드 시 바로 폴링 시작
+    const evtSource = new EventSource('/ready_stream');
+    evtSource.onmessage = function(e) {
+        if (e.data === 'ready') {
+            document.getElementById('btn-start').disabled = false;
+            setStatus('모든 기기 준비 완료! 시작 버튼을 누르세요.', '#22c55e');
+            evtSource.close();
+        }
+    };
   </script>
 </body>
 </html>

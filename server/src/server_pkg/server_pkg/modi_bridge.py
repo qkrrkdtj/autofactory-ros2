@@ -86,10 +86,13 @@ def create_flask_app(start_event: threading.Event, mission_holder: dict, ssh_rea
         with open(html_path, 'r') as f:
             return f.read()
 
-    @app.route('/ready')
-    def ready():
-        # 프론트에서 폴링으로 준비 여부 확인
-        return jsonify({'ready': ssh_ready_event.is_set()})
+    @app.route('/ready_stream')
+    def ready_stream():
+        def event_stream():
+            while not ssh_ready_event.is_set():
+                time.sleep(0.5)
+            yield 'data: ready\n\n'
+        return app.response_class(event_stream(), mimetype='text/event-stream')
     
     @app.route('/start', methods=['POST'])
     def start():
@@ -217,28 +220,30 @@ def main(args=None):
     for omx in omx_connections.values():
         omx.start()
 
-    # ── 시작 신호 대기 (HTML 버튼) ──
-    print("\n⏳ 대시보드에서 [미션 시작] 버튼을 눌러주세요...")
-    start_event.wait()
-    print("✅ 시작 신호 수신 — 미션을 시작합니다!")
-
-    # ── 미션 생성 & 등록 (OMX 연결 주입) ──
-    mission = MissionManager(
-        server['node'], robot1['node'], robot2['node'],
-        omx_connections=omx_connections,
-    )
-    mission_holder['mission'] = mission   # Flask & 키보드가 참조 가능하도록
-
-    # ── OMX 완료 콜백을 미션에 연결 (닭-달걀 해소: 사후 주입) ──
-    # OMX 수신 스레드에서 cycle_done 오면 mission.on_omx_done 호출됨.
-    for omx in omx_connections.values():
-        omx.on_cycle_done = mission.on_omx_done
-
-    # ── 미션 실행 스레드 ──
-    threading.Thread(target=start_mission, args=(mission,), daemon=True).start()
-
-    # ── 메인 루프 ──
     try:
+        # ── 시작 신호 대기 (HTML 버튼) ──
+        print("\n⏳ 대시보드에서 [미션 시작] 버튼을 눌러주세요...")
+        while not start_event.is_set():
+            time.sleep(0.1)
+        print("✅ 시작 신호 수신 — 미션을 시작합니다!")
+
+        # ── 미션 생성 & 등록 (OMX 연결 주입) ──
+        mission = MissionManager(
+            server['node'], robot1['node'], robot2['node'],
+            omx_connections=omx_connections,
+        )
+        mission_holder['mission'] = mission   # Flask & 키보드가 참조 가능하도록
+
+        # ── OMX 완료 콜백을 미션에 연결 (닭-달걀 해소: 사후 주입) ──
+        # OMX 수신 스레드에서 cycle_done 오면 mission.on_omx_done 호출됨.
+        for omx in omx_connections.values():
+            omx.on_cycle_done = mission.on_omx_done
+
+        # ── 미션 실행 스레드 ──
+        threading.Thread(target=start_mission, args=(mission,), daemon=True).start()
+
+        # ── 메인 루프 ──
+        
         while True:
             time.sleep(0.1)
     except KeyboardInterrupt:
