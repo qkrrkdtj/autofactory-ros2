@@ -57,7 +57,7 @@ def ssh_run(device):
         #     print(f"[{device['name']}] {line.strip()}")
 
     except Exception as e:
-        print(f"[{device['name']}] 오류: {e}")
+        print(f"[{device['name']}] SSH 접속 실패 - 기기가 꺼져있거나 네트워크 연결 안됨 ({device['host']})")
         
 def launch_all(on_all_ready=None):
     global _on_all_ready, _ready_count

@@ -191,9 +191,7 @@ def main(args=None):
     flask_thread.start()
     print("\n🌐 대시보드: http://localhost:5000")
 
-    print("SSH launch_all 호출 전")
     launch_all(on_all_ready=lambda: ssh_ready_event.set())
-    print("SSH launch_all 호출 후")
     
     # ── 키보드 리스너 스레드 ──
     kb_thread = threading.Thread(
