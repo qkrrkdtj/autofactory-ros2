@@ -8,7 +8,7 @@ OMX1 / OMX2 PC의 IP, 포트, 정책 이름, 로봇 실행 관련 설정을 한 
 OMX_CONFIGS = {
     "omx1": {
         # ---- 네트워크 (관제서버 <-> OMX1 PC 통신) ----
-        "host": "192.168.100.7",   # TODO: 실제 OMX1 PC IP로 교체
+        "host": "192.168.100.171",   # TODO: 실제 OMX1 PC IP로 교체
         "port": 9001,
 
         # ---- 역할 ----
@@ -20,11 +20,11 @@ OMX_CONFIGS = {
         "policy_path": "angrynose/pick1_ep0_400",     # HuggingFace repo_id (로컬 캐시 사용)
         "dataset_repo_id": "angrynose/pick1",          # 학습에 사용한 데이터셋 repo_id (메타데이터만 사용, action 이름 순서 확인용)
         "home_position": {
-            "shoulder_pan.pos": 1.538,
-            "shoulder_lift.pos": -64.200,
-            "elbow_flex.pos": 55.067,
-            "wrist_flex.pos": 49.988,
-            "wrist_roll.pos": 2.515,
+            "shoulder_pan.pos": 2.125,
+            "shoulder_lift.pos": -64.542,
+            "elbow_flex.pos": 55.556,
+            "wrist_flex.pos": 51.844,
+            "wrist_roll.pos": 3.687,
             "gripper.pos": 50.095,
         },
         "cameras": {
@@ -34,7 +34,7 @@ OMX_CONFIGS = {
     },
     "omx2": {
         # ---- 네트워크 (관제서버 <-> OMX2 PC 통신) ----
-        "host": "192.168.100.171",   # TODO: 실제 OMX2 PC IP로 교체
+        "host": "192.168.100.7",   # TODO: 실제 OMX2 PC IP로 교체
         "port": 9002,
 
         # ---- 역할 ----
