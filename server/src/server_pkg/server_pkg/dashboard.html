@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>🤖 로봇 미션 대시보드</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Segoe UI', sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      gap: 24px;
+    }
+    h1 { font-size: 1.8rem; letter-spacing: 0.05em; color: #7dd3fc; }
+    .card {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 16px;
+      padding: 32px 48px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 16px;
+      width: 380px;
+    }
+    .label { font-size: 0.85rem; color: #94a3b8; letter-spacing: 0.08em; }
+    button {
+      width: 100%;
+      padding: 14px;
+      border: none;
+      border-radius: 10px;
+      font-size: 1.1rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: opacity 0.2s, transform 0.1s;
+    }
+    button:active { transform: scale(0.97); }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    #btn-start  { background: #22c55e; color: #fff; }
+    .signal-btn { background: #f59e0b; color: #fff; flex: 1; }
+    .btn-group { display: flex; gap: 12px; width: 100%; }
+    #status {
+      font-size: 0.9rem;
+      color: #64748b;
+      min-height: 1.2em;
+      text-align: center;
+    }
+    .divider { width: 100%; border: none; border-top: 1px solid #334155; }
+  </style>
+</head>
+<body>
+  <h1>🤖 로봇 미션 대시보드</h1>
+
+  <div class="card">
+    <span class="label">MISSION CONTROL</span>
+    <button id="btn-start" onclick="sendStart()" disabled>▶ 미션 시작</button>
+
+    <hr class="divider">
+
+    <span class="label">EXTERNAL SIGNALS</span>
+    <div class="btn-group">
+      <button class="signal-btn" onclick="sendSignal('A')" disabled>✅ A 해제</button>
+      <button class="signal-btn" onclick="sendSignal('C')" disabled>✅ C 해제</button>
+    </div>
+
+    <p id="status">대기 중...</p>
+  </div>
+
+  <script>
+  
+    async function checkReady() {
+        const res = await fetch('/ready');
+        const data = await res.json();
+        if (data.ready) {
+            document.getElementById('btn-start').disabled = false;
+            setStatus('모든 기기 준비 완료! 시작 버튼을 누르세요.', '#22c55e');
+        } else {
+            setStatus('기기 준비 중...', '#94a3b8');
+            setTimeout(checkReady, 1000);
+        }
+    }
+    
+    async function sendStart() {
+      document.getElementById('btn-start').disabled = true;
+      const res = await fetch('/start', { method: 'POST' });
+      const data = await res.json();
+      setStatus(data.message, '#22c55e');
+      
+      // 시작 후 A, C 신호 버튼 모두 활성화
+      document.querySelectorAll('.signal-btn').forEach(btn => btn.disabled = false);
+    }
+
+    async function sendSignal(wp) {
+      const res = await fetch(`/signal/${wp}`, { method: 'POST' });
+      const data = await res.json();
+      setStatus(data.message, '#f59e0b');
+    }
+
+    function setStatus(msg, color) {
+      const el = document.getElementById('status');
+      el.textContent = msg;
+      el.style.color = color;
+    }
+    
+    checkReady();  // 페이지 로드 시 바로 폴링 시작
+  </script>
+</body>
+</html>
