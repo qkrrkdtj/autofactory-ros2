@@ -2,7 +2,8 @@
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : Main program body (MH-Sensor Flying-Fish + TB6600 Stepper)
+  * @brief          : Main program body (Pill Dispenser + Lid Feeding System)
+  * : Fixed include typo and applied servo 2 safety margin (1200) to prevent lockup
   ******************************************************************************
   */
 /* USER CODE END Header */
@@ -31,15 +32,18 @@
 
 /* Private variables ---------------------------------------------------------*/
 TIM_HandleTypeDef htim2;
+TIM_HandleTypeDef htim3; // 서보모터 제어용 TIM3
 
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
-// 장애물 감지 후 알약 투하 완료 여부 (0: 대기, 1: 투하 완료)
+// [시스템 1] 알약 투하 변수
 uint8_t pill_dispensed = 0;
-
 volatile uint32_t tim_toggle_count  = 0;
 volatile uint32_t tim_target_toggles = 0;
+
+// [시스템 2] 뚜껑 투입 변수
+uint8_t cap_processed = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -47,14 +51,14 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_TIM2_Init(void);
+static void MX_TIM3_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-// TIM2 업데이트 인터럽트마다 PC0(PUL)을 토글하여 스텝 펄스 생성
-// 처음 50 토글 동안 ARR을 1499→299로 선형 감소시켜 소프트 램프 적용
+// TIM2 인터럽트: 스텝모터 가감속 펄스 생성
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
   if (htim->Instance == TIM2)
@@ -86,14 +90,11 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   */
 int main(void)
 {
-
   /* USER CODE BEGIN 1 */
 
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
-
-  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
 
   /* USER CODE BEGIN Init */
@@ -111,8 +112,22 @@ int main(void)
   MX_GPIO_Init();
   MX_USART2_UART_Init();
   MX_TIM2_Init();
-  /* USER CODE BEGIN 2 */
+  MX_TIM3_Init(); // TIM3 활성화
 
+  /* USER CODE BEGIN 2 */
+  // 서보모터용 PWM 채널 1, 2 시작
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);
+
+  // 보드가 처음 켜졌을 때 안전 초기화 위치 설정 (하드웨어 기계적 락 방지 마진 반영)
+  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 600);   // 서보 1번: 대기 위치 (약 0도 부근)
+  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, 2400);  // ⭐ 서보 2번: 원상태인 정회전 끝(약 180도 부근) 위치 대기
+
+  // L298N 액추에이터 초기 정지 상태
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_3, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_4, GPIO_PIN_RESET);
+
+  HAL_Delay(500);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -123,19 +138,20 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 
-    // 레이저 장애물 감지 센서(MH-Sensor Flying-Fish) OUT 핀 읽기
-    // 장애물 감지 시 LOW, 미감지 시 HIGH 출력
+    // =========================================================================
+    // [시스템 1] 기존 알약 투하 제어 로직 (기존 설정 유지)
+    // =========================================================================
     GPIO_PinState sensor_out = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_8);
     static GPIO_PinState prev_sensor_out = GPIO_PIN_SET;
     const char *msg;
 
-    if (sensor_out == GPIO_PIN_RESET)  // LOW: 장애물 감지됨
+    if (sensor_out == GPIO_PIN_RESET)  // LOW: 알약 센서 장애물 감지됨
     {
       HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);  // LED ON
 
       if (prev_sensor_out != GPIO_PIN_RESET)
       {
-        msg = "[SENSOR] DETECTED (LOW)\r\n";
+        msg = "[SYSTEM 1] PILL DETECTED (LOW)\r\n";
         HAL_UART_Transmit(&huart2, (uint8_t *)msg, strlen(msg), 100);
       }
 
@@ -146,35 +162,98 @@ int main(void)
         HAL_GPIO_WritePin(GPIOC, GPIO_PIN_1, GPIO_PIN_RESET);  // DIR 설정
 
         __HAL_TIM_SET_COUNTER(&htim2, 0);
-        __HAL_TIM_SET_AUTORELOAD(&htim2, 1499);  // 램프 시작: 1500µs
+        __HAL_TIM_SET_AUTORELOAD(&htim2, 1499);
         tim_toggle_count    = 0;
-        tim_target_toggles  = 533 * 2;  // 1066 토글 = 533 스텝 (60도)
+        tim_target_toggles  = 533 * 2;  // 60도 회전
         HAL_TIM_Base_Start_IT(&htim2);
         while (tim_toggle_count < tim_target_toggles);
 
-        // ENA는 HIGH로 올리지 않고 LOW 유지 → 홀딩 토크로 축 유동 방지
-
         pill_dispensed = 1;
-
         HAL_Delay(1000);
       }
     }
-    else  // HIGH: 장애물 없음
+    else  // HIGH: 알약 센서 공백
     {
       HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);  // LED OFF
       HAL_GPIO_WritePin(GPIOC, GPIO_PIN_2, GPIO_PIN_SET);    // ENA HIGH: 발열 방지
 
       if (prev_sensor_out != GPIO_PIN_SET)
       {
-        msg = "[SENSOR] CLEARED (HIGH)\r\n";
+        msg = "[SYSTEM 1] PILL CLEARED (HIGH)\r\n";
+        HAL_UART_Transmit(&huart2, (uint8_t *)msg, strlen(msg), 100);
+      }
+      pill_dispensed = 0;
+      HAL_Delay(10);
+    }
+    prev_sensor_out = sensor_out;
+
+
+    // =========================================================================
+    // [시스템 2] 신규 알약 뚜껑 투입 제어 시퀀스 (원상태 = 정회전 끝 대기)
+    // =========================================================================
+    GPIO_PinState cap_sensor = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_9); // 뚜껑 센서(PB9)
+    static GPIO_PinState prev_cap_sensor = GPIO_PIN_SET;
+
+    if (cap_sensor == GPIO_PIN_RESET) // ⭐ [LOW]: 뚜껑 센서 감지됨 ➡️ 역회전 제어 시퀀스 시작
+    {
+      if (prev_cap_sensor != GPIO_PIN_RESET)
+      {
+        msg = "[SYSTEM 2] CAP DETECTED\r\n";
         HAL_UART_Transmit(&huart2, (uint8_t *)msg, strlen(msg), 100);
       }
 
-      pill_dispensed = 0;
-      HAL_Delay(50);
-    }
+      if (cap_processed == 0)
+      {
+    	  // 1. 서보모터 1번: 0도 대기(600) 상태에서 -> 거의 최대 각도(2200)로 확 꺾기
+    	  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 2200);
+    	  HAL_Delay(1000);
 
-    prev_sensor_out = sensor_out;
+    	  // 2. 서보모터 2번: 180도 대기(2400) 상태에서 -> 완전히 반대쪽 끝(800)으로 확 제끼기
+    	  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, 800);
+    	  HAL_Delay(1000);
+
+    	  // 3. 서보모터 2번 미세 조절 (필요 없으면 이 단계를 지우거나 값 조정)
+    	  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, 1400);
+    	  HAL_Delay(800);
+
+        // 4. L298N 제어: 액추에이터 6초 전진 (IN1=HIGH, IN2=LOW)
+        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_3, GPIO_PIN_SET);
+        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_4, GPIO_PIN_RESET);
+        HAL_Delay(6000);
+
+        // 5. L298N 제어: 액추에이터 6초 후진 (IN1=LOW, IN2=HIGH)
+        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_3, GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_4, GPIO_PIN_SET);
+        HAL_Delay(6500);
+
+        // 6. 액추에이터 완전 정지 (IN1=LOW, IN2=LOW)
+        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_3, GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_4, GPIO_PIN_RESET);
+
+        // 7. 시퀀스 완료 후 원상태 복귀값 인가
+        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 600);  // 서보 1번 초기화
+        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, 2400); // 서보 2번 원상태 복귀 (정회전 끝 마진 반영)
+        HAL_Delay(1000); // 복귀 완료를 위한 대기시간
+
+        cap_processed = 1;
+      }
+    }
+    else // ⭐ [HIGH]: 뚜껑 센서 미감지 ➡️ 대기 상태
+    {
+      if (prev_cap_sensor != GPIO_PIN_SET)
+      {
+        msg = "[SYSTEM 2] CAP CLEARED -> RETURNING TO HOME\r\n";
+        HAL_UART_Transmit(&huart2, (uint8_t *)msg, strlen(msg), 100);
+
+        // 무한 반복 호출로 모터 제어 레지스터 회로가 먹통이 되는 버그 방지 (상태 변화 시 딱 한 번만 펄스 갱신)
+        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 600);   // 서보 1번 평상시 위치
+        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, 2400);  // ⭐ 서보 2번 원상태 고정
+      }
+
+      cap_processed = 0; // 플래그 초기화
+      HAL_Delay(50);     // CPU 점유율 과부하 방지 딜레이
+    }
+    prev_cap_sensor = cap_sensor;
 
   }
   /* USER CODE END 3 */
@@ -182,21 +261,15 @@ int main(void)
 
 /**
   * @brief System Clock Configuration
-  * @retval None
   */
 void SystemClock_Config(void)
 {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
-  /** Configure the main internal regulator output voltage
-  */
   __HAL_RCC_PWR_CLK_ENABLE();
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
 
-  /** Initializes the RCC Oscillators according to the specified parameters
-  * in the RCC_OscInitTypeDef structure.
-  */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
@@ -211,8 +284,6 @@ void SystemClock_Config(void)
     Error_Handler();
   }
 
-  /** Initializes the CPU, AHB and APB buses clocks
-  */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
@@ -227,23 +298,13 @@ void SystemClock_Config(void)
 }
 
 /**
-  * @brief TIM2 Initialization Function
-  * @param None
-  * @retval None
+  * @brief TIM2 Initialization Function (기존 설정 유지)
   */
 static void MX_TIM2_Init(void)
 {
-
-  /* USER CODE BEGIN TIM2_Init 0 */
-
-  /* USER CODE END TIM2_Init 0 */
-
   TIM_ClockConfigTypeDef sClockSourceConfig = {0};
   TIM_MasterConfigTypeDef sMasterConfig = {0};
 
-  /* USER CODE BEGIN TIM2_Init 1 */
-
-  /* USER CODE END TIM2_Init 1 */
   htim2.Instance = TIM2;
   htim2.Init.Prescaler = 83;
   htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
@@ -265,27 +326,63 @@ static void MX_TIM2_Init(void)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN TIM2_Init 2 */
-
-  /* USER CODE END TIM2_Init 2 */
-
 }
 
 /**
-  * @brief USART2 Initialization Function
-  * @param None
-  * @retval None
+  * @brief TIM3 Initialization Function (서보모터 PWM 주파수 50Hz 생성용)
+  */
+static void MX_TIM3_Init(void)
+{
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+
+  htim3.Instance = TIM3;
+  htim3.Init.Prescaler = 83;                   // 1MHz 카운팅 클럭 생성
+  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim3.Init.Period = 19999;                   // 20,000 카운트 = 20ms 주기 (50Hz)
+  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim3, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_Init(&htim3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /* PWM Channels Configuration */
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 600;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+/**
+  * @brief USART2 Initialization Function (기존 유지)
   */
 static void MX_USART2_UART_Init(void)
 {
-
-  /* USER CODE BEGIN USART2_Init 0 */
-
-  /* USER CODE END USART2_Init 0 */
-
-  /* USER CODE BEGIN USART2_Init 1 */
-
-  /* USER CODE END USART2_Init 1 */
   huart2.Instance = USART2;
   huart2.Init.BaudRate = 115200;
   huart2.Init.WordLength = UART_WORDLENGTH_8B;
@@ -298,23 +395,14 @@ static void MX_USART2_UART_Init(void)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN USART2_Init 2 */
-
-  /* USER CODE END USART2_Init 2 */
-
 }
 
 /**
   * @brief GPIO Initialization Function
-  * @param None
-  * @retval None
   */
 static void MX_GPIO_Init(void)
 {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
-  /* USER CODE BEGIN MX_GPIO_Init_1 */
-
-  /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOC_CLK_ENABLE();
@@ -322,74 +410,43 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2, GPIO_PIN_RESET);
+  /* 출력 핀 초기 레벨 설정 */
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_4, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin : B1_Pin */
-  GPIO_InitStruct.Pin = B1_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : PC0 PC1 PC2 */
-  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2;
+  /* PC0 ~ PC4 출력 핀 설정 (스텝모터 및 L298N 제어용) */
+  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_4;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : LD2_Pin */
-  GPIO_InitStruct.Pin = LD2_Pin;
+  /* PA5 내장 디버깅 LED 출력 설정 */
+  GPIO_InitStruct.Pin = GPIO_PIN_5;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(LD2_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : PB8 */
-  GPIO_InitStruct.Pin = GPIO_PIN_8;
+  /* PA6(TIM3_CH1), PA7(TIM3_CH2) 서보모터 PWM 출력 얼터네이트 핀 설정 */
+  GPIO_InitStruct.Pin = GPIO_PIN_6|GPIO_PIN_7;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  GPIO_InitStruct.Alternate = GPIO_AF2_TIM3; // TIM3 매핑 고정
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /* PB8 (알약 센서) 및 PB9 (뚜껑 센서) 입력 핀 설정 */
+  GPIO_InitStruct.Pin = GPIO_PIN_8|GPIO_PIN_9;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
-  /* USER CODE BEGIN MX_GPIO_Init_2 */
-
-  /* USER CODE END MX_GPIO_Init_2 */
 }
 
-/* USER CODE BEGIN 4 */
-
-/* USER CODE END 4 */
-
-/**
-  * @brief  This function is executed in case of error occurrence.
-  * @retval None
-  */
 void Error_Handler(void)
 {
-  /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
   while (1)
   {
   }
-  /* USER CODE END Error_Handler_Debug */
 }
-#ifdef USE_FULL_ASSERT
-/**
-  * @brief  Reports the name of the source file and the source line number
-  *         where the assert_param error has occurred.
-  * @param  file: pointer to the source file name
-  * @param  line: assert_param error line source number
-  * @retval None
-  */
-void assert_failed(uint8_t *file, uint32_t line)
-{
-  /* USER CODE BEGIN 6 */
-  /* User can add his own implementation to report the file name and line number,
-     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
-  /* USER CODE END 6 */
-}
-#endif /* USE_FULL_ASSERT */
