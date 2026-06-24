@@ -2,7 +2,7 @@
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : Main program body (Ultrasonic HC-SR04 + TB6600 Stepper)
+  * @brief          : Main program body (MH-Sensor Flying-Fish + TB6600 Stepper)
   ******************************************************************************
   */
 /* USER CODE END Header */
@@ -11,7 +11,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -30,58 +30,53 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+TIM_HandleTypeDef htim2;
+
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
-// 약통 배출 상태를 기억하는 변수 (0: 대기, 1: 배출 완료)
-uint8_t bottle_detected = 0;
+// 장애물 감지 후 알약 투하 완료 여부 (0: 대기, 1: 투하 완료)
+uint8_t pill_dispensed = 0;
+
+volatile uint32_t tim_toggle_count  = 0;
+volatile uint32_t tim_target_toggles = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART2_UART_Init(void);
+static void MX_TIM2_Init(void);
 /* USER CODE BEGIN PFP */
-// 마이크로초 단위 딜레이 및 초음파 거리 측정 함수 선언
-void delay_us(uint32_t us);
-uint32_t get_distance_cm(void);
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-// 마이크로초 딜레이 함수 (84MHz 기준)
-void delay_us(uint32_t us)
+// TIM2 업데이트 인터럽트마다 PC0(PUL)을 토글하여 스텝 펄스 생성
+// 처음 50 토글 동안 ARR을 1499→299로 선형 감소시켜 소프트 램프 적용
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
-  uint32_t delay = (SystemCoreClock / 1000000 / 4) * us;
-  while (delay--) { __asm("NOP"); }
-}
+  if (htim->Instance == TIM2)
+  {
+    if (tim_toggle_count < tim_target_toggles)
+    {
+      HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0,
+          (tim_toggle_count % 2 == 0) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+      tim_toggle_count++;
 
-// 초음파 거리 측정 함수
-uint32_t get_distance_cm(void)
-{
-  uint32_t local_time = 0;
-
-  // 1. Trig(PB8) 핀으로 10us 펄스 발사
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_SET);
-  delay_us(10);
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_RESET);
-
-  // 2. Echo(PB9) 핀이 HIGH가 될 때까지 대기
-  uint32_t timeout = 1000;
-  while(HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_9) == GPIO_PIN_RESET) {
-      delay_us(1);
-      if(--timeout == 0) return 999;
+      if (tim_toggle_count < 50)
+        __HAL_TIM_SET_AUTORELOAD(&htim2, 1500 - 24 * tim_toggle_count - 1);
+      else
+        __HAL_TIM_SET_AUTORELOAD(&htim2, 299);
+    }
+    else
+    {
+      __HAL_TIM_SET_AUTORELOAD(&htim2, 299);
+      HAL_TIM_Base_Stop_IT(&htim2);
+      HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0, GPIO_PIN_RESET);
+    }
   }
-
-  // 3. Echo(PB9) 핀이 HIGH인 시간 측정
-  while(HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_9) == GPIO_PIN_SET) {
-      local_time++;
-      delay_us(1);
-      if(local_time > 20000) break;
-  }
-
-  // 4. 거리 계산 (cm)
-  return local_time / 58;
 }
 /* USER CODE END 0 */
 
@@ -91,6 +86,7 @@ uint32_t get_distance_cm(void)
   */
 int main(void)
 {
+
   /* USER CODE BEGIN 1 */
 
   /* USER CODE END 1 */
@@ -114,7 +110,7 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_USART2_UART_Init();
-
+  MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
 
   /* USER CODE END 2 */
@@ -127,58 +123,58 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 
-    // 1. 초음파 센서로 현재 거리 측정
-    uint32_t distance = get_distance_cm();
+    // 레이저 장애물 감지 센서(MH-Sensor Flying-Fish) OUT 핀 읽기
+    // 장애물 감지 시 LOW, 미감지 시 HIGH 출력
+    GPIO_PinState sensor_out = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_8);
+    static GPIO_PinState prev_sensor_out = GPIO_PIN_SET;
+    const char *msg;
 
-    // 2. 측정된 거리가 2cm ~ 4cm 사이일 때 (약통 감지)
-    if (distance >= 2 && distance <= 4)
+    if (sensor_out == GPIO_PIN_RESET)  // LOW: 장애물 감지됨
     {
-      // 보드 내장 LED 켜기 (물체 감지 확인용)
-      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);
+      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);  // LED ON
 
-      // 아직 배출하지 않은 약통이라면 동작
-      if (bottle_detected == 0)
+      if (prev_sensor_out != GPIO_PIN_RESET)
       {
-        // [모터 활성화] 공통 음극: ENA(PC2) LOW 시 전류 공급 (잠김)
-        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_2, GPIO_PIN_RESET);
-        HAL_Delay(10); // 잠길 시간 부여
+        msg = "[SENSOR] DETECTED (LOW)\r\n";
+        HAL_UART_Transmit(&huart2, (uint8_t *)msg, strlen(msg), 100);
+      }
 
-        // [방향 설정] DIR(PC1)
-        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_1, GPIO_PIN_RESET);
+      if (pill_dispensed == 0)
+      {
+        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_2, GPIO_PIN_RESET);  // ENA LOW: 활성화
+        HAL_Delay(10);
+        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_1, GPIO_PIN_RESET);  // DIR 설정
 
-        // [60도 회전] 1/16 분주 기준 533 스텝
-        int steps_for_60_deg = 533;
-        for (int i = 0; i < steps_for_60_deg; i++)
-        {
-          // 공통 음극: PUL(PC0) HIGH에서 동작
-          HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0, GPIO_PIN_SET);
-          delay_us(300);
-          HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0, GPIO_PIN_RESET);
-          delay_us(300);
-        }
+        __HAL_TIM_SET_COUNTER(&htim2, 0);
+        __HAL_TIM_SET_AUTORELOAD(&htim2, 1499);  // 램프 시작: 1500µs
+        tim_toggle_count    = 0;
+        tim_target_toggles  = 533 * 2;  // 1066 토글 = 533 스텝 (60도)
+        HAL_TIM_Base_Start_IT(&htim2);
+        while (tim_toggle_count < tim_target_toggles);
 
-        // [발열 방지] 모터 비활성화: ENA(PC2) HIGH 시 전류 차단 (풀림)
-        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_2, GPIO_PIN_SET);
+        // ENA는 HIGH로 올리지 않고 LOW 유지 → 홀딩 토크로 축 유동 방지
 
-        // 배출 완료 상태 저장
-        bottle_detected = 1;
+        pill_dispensed = 1;
 
-        // 연속 회전 방지 딜레이
         HAL_Delay(1000);
       }
     }
-    // 3. 측정 거리가 5cm 이상일 때 (약통 완전히 지나감)
-    else if (distance > 5 && distance < 100)
+    else  // HIGH: 장애물 없음
     {
-      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET); // LED 끄기
-      bottle_detected = 0; // 다음 약통을 위해 리셋
+      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);  // LED OFF
+      HAL_GPIO_WritePin(GPIOC, GPIO_PIN_2, GPIO_PIN_SET);    // ENA HIGH: 발열 방지
+
+      if (prev_sensor_out != GPIO_PIN_SET)
+      {
+        msg = "[SENSOR] CLEARED (HIGH)\r\n";
+        HAL_UART_Transmit(&huart2, (uint8_t *)msg, strlen(msg), 100);
+      }
+
+      pill_dispensed = 0;
       HAL_Delay(50);
     }
-    else
-    {
-      // 에러값(999)이나 너무 가까운 노이즈는 무시
-      HAL_Delay(10);
-    }
+
+    prev_sensor_out = sensor_out;
 
   }
   /* USER CODE END 3 */
@@ -231,12 +227,65 @@ void SystemClock_Config(void)
 }
 
 /**
+  * @brief TIM2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM2_Init(void)
+{
+
+  /* USER CODE BEGIN TIM2_Init 0 */
+
+  /* USER CODE END TIM2_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM2_Init 1 */
+
+  /* USER CODE END TIM2_Init 1 */
+  htim2.Instance = TIM2;
+  htim2.Init.Prescaler = 83;
+  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim2.Init.Period = 299;
+  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM2_Init 2 */
+
+  /* USER CODE END TIM2_Init 2 */
+
+}
+
+/**
   * @brief USART2 Initialization Function
   * @param None
   * @retval None
   */
 static void MX_USART2_UART_Init(void)
 {
+
+  /* USER CODE BEGIN USART2_Init 0 */
+
+  /* USER CODE END USART2_Init 0 */
+
+  /* USER CODE BEGIN USART2_Init 1 */
+
+  /* USER CODE END USART2_Init 1 */
   huart2.Instance = USART2;
   huart2.Init.BaudRate = 115200;
   huart2.Init.WordLength = UART_WORDLENGTH_8B;
@@ -249,6 +298,10 @@ static void MX_USART2_UART_Init(void)
   {
     Error_Handler();
   }
+  /* USER CODE BEGIN USART2_Init 2 */
+
+  /* USER CODE END USART2_Init 2 */
+
 }
 
 /**
@@ -259,6 +312,9 @@ static void MX_USART2_UART_Init(void)
 static void MX_GPIO_Init(void)
 {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
+  /* USER CODE BEGIN MX_GPIO_Init_1 */
+
+  /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOC_CLK_ENABLE();
@@ -271,9 +327,6 @@ static void MX_GPIO_Init(void)
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_RESET);
 
   /*Configure GPIO pin : B1_Pin */
   GPIO_InitStruct.Pin = B1_Pin;
@@ -297,17 +350,18 @@ static void MX_GPIO_Init(void)
 
   /*Configure GPIO pin : PB8 */
   GPIO_InitStruct.Pin = GPIO_PIN_8;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : PB9 */
-  GPIO_InitStruct.Pin = GPIO_PIN_9;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+  /* USER CODE BEGIN MX_GPIO_Init_2 */
+
+  /* USER CODE END MX_GPIO_Init_2 */
 }
+
+/* USER CODE BEGIN 4 */
+
+/* USER CODE END 4 */
 
 /**
   * @brief  This function is executed in case of error occurrence.
@@ -315,14 +369,27 @@ static void MX_GPIO_Init(void)
   */
 void Error_Handler(void)
 {
+  /* USER CODE BEGIN Error_Handler_Debug */
+  /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
   while (1)
   {
   }
+  /* USER CODE END Error_Handler_Debug */
 }
-
-#ifdef  USE_FULL_ASSERT
+#ifdef USE_FULL_ASSERT
+/**
+  * @brief  Reports the name of the source file and the source line number
+  *         where the assert_param error has occurred.
+  * @param  file: pointer to the source file name
+  * @param  line: assert_param error line source number
+  * @retval None
+  */
 void assert_failed(uint8_t *file, uint32_t line)
 {
+  /* USER CODE BEGIN 6 */
+  /* User can add his own implementation to report the file name and line number,
+     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+  /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
