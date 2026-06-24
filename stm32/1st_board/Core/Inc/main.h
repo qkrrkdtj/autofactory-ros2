@@ -32,24 +32,32 @@ extern "C" {
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdbool.h>
+#include "cmsis_os.h"
 /* USER CODE END Includes */
 
 /* Exported types ------------------------------------------------------------*/
 /* USER CODE BEGIN ET */
 typedef struct
 {
-  bool valid;
-  bool sensor;
-} NodeState;
+  uint8_t machine_stage;
+  uint8_t belt_running;
+} BeltStatus;
 /* USER CODE END ET */
 
 /* Exported constants --------------------------------------------------------*/
 /* USER CODE BEGIN EC */
-#define NODE_COUNT          4U
-#define CAN_ID_BASE         0x010U
+#define MACHINE_STAGE_IDLE    0U
+#define MACHINE_STAGE_FORWARD 1U
+#define MACHINE_STAGE_RUNNING 2U
+#define BELT_STATE_STOPPED    0U
+#define BELT_STATE_RUNNING    1U
 
-#define FLASH_NODE_ID_ADDR  0x08060000U
-#define FLASH_NODE_ID_MAGIC 0xA5A55A5AU
+#define UART_CMD_START     'S'
+#define UART_RSP_OK        'O'
+#define UART_RSP_NG        'N'
+#define UART_PI_DELAY_MS   500U
+#define UART_RX_TIMEOUT_MS 1000U
+#define PI_RSP_LOG_SIZE    16U
 /* USER CODE END EC */
 
 /* Exported macro ------------------------------------------------------------*/
@@ -61,20 +69,16 @@ typedef struct
 void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
-extern uint8_t   g_node_id;
-extern NodeState node_states[NODE_COUNT + 1U];
+extern BeltStatus  g_belt_status;
+extern osMutexId_t beltMutex;
 bool ReadSensor(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
-#define B1_Pin GPIO_PIN_13
-#define B1_GPIO_Port GPIOC
 #define USART_TX_Pin GPIO_PIN_2
 #define USART_TX_GPIO_Port GPIOA
 #define USART_RX_Pin GPIO_PIN_3
 #define USART_RX_GPIO_Port GPIOA
-#define RELAY_Pin GPIO_PIN_10
-#define RELAY_GPIO_Port GPIOB
 #define TMS_Pin GPIO_PIN_13
 #define TMS_GPIO_Port GPIOA
 #define TCK_Pin GPIO_PIN_14
@@ -83,13 +87,12 @@ bool ReadSensor(void);
 #define SWO_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
-#define MCP2515_CS_Pin GPIO_PIN_4
-#define MCP2515_CS_GPIO_Port GPIOA
-#define MCP2515_INT_Pin GPIO_PIN_0
-#define MCP2515_INT_GPIO_Port GPIOB
-#define SENSOR_Pin GPIO_PIN_1
-#define SENSOR_GPIO_Port GPIOB
-
+#define B1_Pin             GPIO_PIN_13
+#define B1_GPIO_Port       GPIOC
+#define SENSOR_Pin         GPIO_PIN_1
+#define SENSOR_GPIO_Port   GPIOB
+#define RELAY_Pin          GPIO_PIN_10
+#define RELAY_GPIO_Port    GPIOB
 #define ACT1_IN1_Pin       GPIO_PIN_8
 #define ACT1_IN1_GPIO_Port GPIOB
 #define ACT1_IN2_Pin       GPIO_PIN_9

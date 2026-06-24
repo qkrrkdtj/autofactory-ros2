@@ -22,7 +22,6 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "mcp2515.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
@@ -35,7 +34,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-/* constants moved to main.h (shared with freertos.c) */
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -56,13 +55,16 @@ const osThreadAttr_t defaultTask_attributes = {
   .priority = (osPriority_t) osPriorityNormal,
 };
 /* USER CODE BEGIN PV */
-MCP2515_HandleTypeDef hmcp2515;
-uint8_t               g_node_id;
-NodeState             node_states[NODE_COUNT + 1U];
+BeltStatus g_belt_status;
 
-osMutexId_t        spiMutex;
-osMutexId_t        stateMutex;
-osMessageQueueId_t canTxQueue;
+osMutexId_t beltMutex;
+osMutexId_t piRspMutex;
+
+static volatile bool g_sensor_monitoring = false;
+static volatile bool g_sensor_triggered  = false;
+
+static uint8_t  g_pi_rsp_log[PI_RSP_LOG_SIZE];
+static uint16_t g_pi_rsp_count = 0U;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -73,150 +75,223 @@ static void MX_SPI1_Init(void);
 void StartDefaultTask(void *argument);
 
 /* USER CODE BEGIN PFP */
-static HAL_StatusTypeDef Flash_ReadNodeId(uint8_t *node_id);
-static HAL_StatusTypeDef Flash_WriteNodeId(uint8_t node_id);
-static HAL_StatusTypeDef Flash_EraseNodeId(void);
-static uint8_t SelectAndSaveNodeId(void);
-static void SensorTxTask(void *argument);
-static void CANManagerTask(void *argument);
+static void BeltTask(void *argument);
 static void DisplayTask(void *argument);
+static void SensorMonitoring_Enable(void);
+static void SensorMonitoring_Disable(void);
+static bool Sensor_ConfirmDetected(void);
+static void BeltStatus_Update(uint8_t stage, bool belt_on);
+static void PiUart_FlushRx(void);
+static void HandleObstacleDetected(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-static void UART_Print(const char *msg)
-{
-  HAL_UART_Transmit(&huart2, (uint8_t *)msg, (uint16_t)strlen(msg), HAL_MAX_DELAY);
-}
-
-int __io_putchar(int ch)
-{
-  HAL_UART_Transmit(&huart2, (uint8_t *)&ch, 1, HAL_MAX_DELAY);
-  return ch;
-}
-
-static HAL_StatusTypeDef Flash_ReadNodeId(uint8_t *node_id)
-{
-  uint32_t magic = *(__IO uint32_t *)FLASH_NODE_ID_ADDR;
-  uint32_t id    = *(__IO uint32_t *)(FLASH_NODE_ID_ADDR + 4U);
-
-  if (magic == FLASH_NODE_ID_MAGIC && id >= 1U && id <= NODE_COUNT)
-  {
-    *node_id = (uint8_t)id;
-    return HAL_OK;
-  }
-  return HAL_ERROR;
-}
-
-static HAL_StatusTypeDef Flash_EraseNodeId(void)
-{
-  FLASH_EraseInitTypeDef erase = {0};
-  uint32_t sector_error = 0U;
-
-  erase.TypeErase    = FLASH_TYPEERASE_SECTORS;
-  erase.VoltageRange = FLASH_VOLTAGE_RANGE_3;
-  erase.Sector       = FLASH_SECTOR_7;
-  erase.NbSectors    = 1U;
-
-  HAL_FLASH_Unlock();
-  HAL_StatusTypeDef status = HAL_FLASHEx_Erase(&erase, &sector_error);
-  HAL_FLASH_Lock();
-  return status;
-}
-
-static HAL_StatusTypeDef Flash_WriteNodeId(uint8_t node_id)
-{
-  if (Flash_EraseNodeId() != HAL_OK)
-  {
-    return HAL_ERROR;
-  }
-
-  HAL_FLASH_Unlock();
-  HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, FLASH_NODE_ID_ADDR,       FLASH_NODE_ID_MAGIC);
-  HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, FLASH_NODE_ID_ADDR + 4U,  (uint32_t)node_id);
-  HAL_FLASH_Lock();
-  return HAL_OK;
-}
-
-static uint8_t SelectAndSaveNodeId(void)
-{
-  uint8_t stored_id = 0U;
-
-  if (Flash_ReadNodeId(&stored_id) == HAL_OK)
-  {
-    printf("Stored Node ID found: Node %u\r\n", stored_id);
-    printf("Hold USER button 3s to reset, or wait...\r\n");
-
-    bool held = true;
-    for (uint32_t i = 0U; i < 30U; i++)
-    {
-      if (HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin) != GPIO_PIN_RESET)
-      {
-        held = false;
-        break;
-      }
-      HAL_Delay(100);
-    }
-
-    if (!held)
-    {
-      return stored_id;
-    }
-
-    printf("Node ID reset.\r\n");
-    Flash_EraseNodeId();
-  }
-
-  printf("Node ID selection:\r\n");
-  printf("  Press USER button 1~4 times, then wait 2s to confirm.\r\n");
-  printf("  Waiting for first press...\r\n");
-
-  while (HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin) != GPIO_PIN_RESET)
-  {
-    HAL_Delay(10);
-  }
-
-  uint8_t count = 0U;
-  uint32_t last_press = HAL_GetTick();
-
-  while (1)
-  {
-    if (HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin) == GPIO_PIN_RESET)
-    {
-      count++;
-      printf("  Press count: %u\r\n", count);
-      last_press = HAL_GetTick();
-      while (HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin) == GPIO_PIN_RESET)
-      {
-        HAL_Delay(10);
-      }
-      HAL_Delay(50);
-    }
-
-    if ((HAL_GetTick() - last_press) >= 2000U)
-    {
-      break;
-    }
-  }
-
-  if (count < 1U || count > NODE_COUNT)
-  {
-    printf("Invalid count (%u), defaulting to Node 1\r\n", count);
-    count = 1U;
-  }
-
-  if (Flash_WriteNodeId(count) == HAL_OK)
-  {
-    printf("Node %u saved to Flash.\r\n", count);
-  }
-
-  return count;
-}
 
 bool ReadSensor(void)
 {
   return (HAL_GPIO_ReadPin(SENSOR_GPIO_Port, SENSOR_Pin) == GPIO_PIN_RESET);
 }
+
+/* Arm EXTI interrupt for sensor detection. */
+static void SensorMonitoring_Enable(void)
+{
+  g_sensor_triggered  = false;
+  g_sensor_monitoring = false;
+  __HAL_GPIO_EXTI_CLEAR_IT(SENSOR_Pin);
+  g_sensor_monitoring = true;
+}
+
+/* Disarm EXTI interrupt and clear pending trigger flag. */
+static void SensorMonitoring_Disable(void)
+{
+  g_sensor_monitoring = false;
+  g_sensor_triggered  = false;
+  __HAL_GPIO_EXTI_CLEAR_IT(SENSOR_Pin);
+}
+
+/* Read sensor three times with 1ms gaps to reject noise. */
+static bool Sensor_ConfirmDetected(void)
+{
+  if (!ReadSensor()) return false;
+  osDelay(1U);
+  if (!ReadSensor()) return false;
+  osDelay(1U);
+  return ReadSensor();
+}
+
+/* EXTI callback: fires on falling edge of SENSOR_Pin (PB1).
+   Immediately cuts relay power and flags the detection for the task. */
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+  if (GPIO_Pin != SENSOR_Pin || !g_sensor_monitoring)
+    return;
+  if (HAL_GPIO_ReadPin(SENSOR_GPIO_Port, SENSOR_Pin) != GPIO_PIN_RESET)
+    return;
+
+  for (volatile uint32_t i = 0U; i < 200U; i++)
+    __NOP();
+
+  if (HAL_GPIO_ReadPin(SENSOR_GPIO_Port, SENSOR_Pin) != GPIO_PIN_RESET)
+    return;
+
+  g_sensor_monitoring = false;
+  g_sensor_triggered  = true;
+  HAL_GPIO_WritePin(RELAY_GPIO_Port, RELAY_Pin, GPIO_PIN_RESET);
+}
+
+/* Update belt state for DisplayTask consumption. */
+static void BeltStatus_Update(uint8_t stage, bool belt_on)
+{
+  osMutexAcquire(beltMutex, osWaitForever);
+  g_belt_status.machine_stage = stage;
+  g_belt_status.belt_running  = belt_on ? BELT_STATE_RUNNING : BELT_STATE_STOPPED;
+  osMutexRelease(beltMutex);
+}
+
+/* Drain any leftover bytes from the UART RX buffer. */
+static void PiUart_FlushRx(void)
+{
+  uint8_t dummy;
+  while (HAL_UART_Receive(&huart2, &dummy, 1U, 1U) == HAL_OK) {}
+}
+
+/* Send 'S' to Raspberry Pi immediately, receive one-byte inference result.
+   Timeout is treated as 'N'. After response is stored, waits UART_PI_DELAY_MS
+   before returning so the caller can resume the belt. */
+static void HandleObstacleDetected(void)
+{
+  uint8_t tx_byte = UART_CMD_START;
+  uint8_t rx_byte = UART_RSP_NG;
+
+  HAL_StatusTypeDef rx_status;
+  PiUart_FlushRx();
+  HAL_UART_Transmit(&huart2, &tx_byte, 1U, HAL_MAX_DELAY);
+  rx_status = HAL_UART_Receive(&huart2, &rx_byte, 1U, UART_RX_TIMEOUT_MS);
+
+  if (rx_status != HAL_OK)
+    rx_byte = UART_RSP_NG;
+
+  osMutexAcquire(piRspMutex, osWaitForever);
+  g_pi_rsp_log[g_pi_rsp_count % PI_RSP_LOG_SIZE] = rx_byte;
+  g_pi_rsp_count++;
+  osMutexRelease(piRspMutex);
+
+  osDelay(UART_PI_DELAY_MS);
+}
+
+/* Belt state machine.
+   IDLE    : waits for button press, then starts actuator1 forward.
+   FORWARD : holds actuator1 forward for 8s, then transitions to RUNNING.
+   RUNNING : actuator1 backward, belt ON, sensor monitoring active.
+             On obstacle: belt OFF -> Pi UART exchange -> belt ON (loops). */
+static void BeltTask(void *argument)
+{
+  (void)argument;
+
+  const uint32_t forward_ms = 8000U;
+
+  uint8_t  current_stage    = MACHINE_STAGE_IDLE;
+  uint32_t stage_start_tick = osKernelGetTickCount();
+  bool     sensor_active    = false;
+
+  for (;;)
+  {
+    uint32_t current_tick = osKernelGetTickCount();
+
+    switch (current_stage)
+    {
+      case MACHINE_STAGE_IDLE:
+        SensorMonitoring_Disable();
+        if (HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin) == GPIO_PIN_RESET)
+        {
+          while (HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin) == GPIO_PIN_RESET)
+            osDelay(10U);
+          osDelay(50U);
+
+          current_stage    = MACHINE_STAGE_FORWARD;
+          stage_start_tick = osKernelGetTickCount();
+          sensor_active    = false;
+        }
+        break;
+
+      case MACHINE_STAGE_FORWARD:
+        SensorMonitoring_Disable();
+        if ((current_tick - stage_start_tick) >= forward_ms)
+        {
+          current_stage = MACHINE_STAGE_RUNNING;
+          sensor_active = true;
+          SensorMonitoring_Enable();
+        }
+        break;
+
+      case MACHINE_STAGE_RUNNING:
+        if (sensor_active && g_sensor_triggered)
+        {
+          if (Sensor_ConfirmDetected())
+          {
+            SensorMonitoring_Disable();
+            sensor_active = false;
+
+            HandleObstacleDetected();
+
+            sensor_active = true;
+            SensorMonitoring_Enable();
+          }
+          else
+          {
+            g_sensor_triggered = false;
+            SensorMonitoring_Enable();
+          }
+        }
+        break;
+
+      default:
+        SensorMonitoring_Disable();
+        current_stage = MACHINE_STAGE_IDLE;
+        sensor_active = false;
+        break;
+    }
+
+    bool belt_on = false;
+    switch (current_stage)
+    {
+      case MACHINE_STAGE_IDLE:
+        HAL_GPIO_WritePin(RELAY_GPIO_Port,    RELAY_Pin,    GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(ACT1_IN1_GPIO_Port, ACT1_IN1_Pin, GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(ACT1_IN2_GPIO_Port, ACT1_IN2_Pin, GPIO_PIN_SET);
+        break;
+
+      case MACHINE_STAGE_FORWARD:
+        HAL_GPIO_WritePin(RELAY_GPIO_Port,    RELAY_Pin,    GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(ACT1_IN1_GPIO_Port, ACT1_IN1_Pin, GPIO_PIN_SET);
+        HAL_GPIO_WritePin(ACT1_IN2_GPIO_Port, ACT1_IN2_Pin, GPIO_PIN_RESET);
+        break;
+
+      case MACHINE_STAGE_RUNNING:
+        /* sensor_active = false while HandleObstacleDetected is executing */
+        belt_on = sensor_active;
+        HAL_GPIO_WritePin(RELAY_GPIO_Port,    RELAY_Pin,    belt_on ? GPIO_PIN_SET : GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(ACT1_IN1_GPIO_Port, ACT1_IN1_Pin, GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(ACT1_IN2_GPIO_Port, ACT1_IN2_Pin, GPIO_PIN_SET);
+        break;
+
+      default:
+        break;
+    }
+
+    BeltStatus_Update(current_stage, belt_on);
+    osDelay(current_stage == MACHINE_STAGE_RUNNING ? 1U : 50U);
+  }
+}
+
+static void DisplayTask(void *argument)
+{
+  (void)argument;
+  for (;;)
+    osDelay(osWaitForever);
+}
+
 /* USER CODE END 0 */
 
 /**
@@ -251,47 +326,17 @@ int main(void)
   MX_USART2_UART_Init();
   MX_SPI1_Init();
   /* USER CODE BEGIN 2 */
-  setvbuf(stdout, NULL, _IONBF, 0);
-
-  UART_Print("\r\n\r\n=== STM32 CAN Test ===\r\n");
-  UART_Print("Serial: 115200 8N1\r\n");
-  UART_Print("Waiting 2s... (open terminal, then press RESET)\r\n");
-  HAL_Delay(2000);
-
-  hmcp2515.hspi = &hspi1;
-  hmcp2515.cs_port = MCP2515_CS_GPIO_Port;
-  hmcp2515.cs_pin = MCP2515_CS_Pin;
-  hmcp2515.osc_hz = MCP2515_OSC_8MHZ;
-
-  printf("\r\nMCP2515 CAN Multi-Node (%u boards)\r\n", NODE_COUNT);
-  printf("Auto-detect crystal (8/16 MHz), bitrate: 125kbps\r\n");
-
-  if (MCP2515_AutoDetectOsc(&hmcp2515) != HAL_OK)
-  {
-    printf("MCP2515 init failed\r\n");
-    MCP2515_PrintDiag(&hmcp2515);
-    Error_Handler();
-  }
-
-  printf("Crystal: %lu MHz detected\r\n",
-         (unsigned long)(hmcp2515.osc_hz / 1000000U));
-
-  if (MCP2515_SetNormalMode(&hmcp2515) != HAL_OK)
-  {
-    printf("Normal mode failed\r\n");
-    Error_Handler();
-  }
-
-  g_node_id = SelectAndSaveNodeId();
-  printf("Node %u ready. Starting FreeRTOS...\r\n", g_node_id);
+  HAL_Delay(500U);
   /* USER CODE END 2 */
 
   /* Init scheduler */
   osKernelInitialize();
 
   /* USER CODE BEGIN RTOS_MUTEX */
-  spiMutex   = osMutexNew(NULL);
-  stateMutex = osMutexNew(NULL);
+  beltMutex  = osMutexNew(NULL);
+  piRspMutex = osMutexNew(NULL);
+  if (beltMutex == NULL || piRspMutex == NULL)
+    Error_Handler();
   /* USER CODE END RTOS_MUTEX */
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
@@ -303,7 +348,7 @@ int main(void)
   /* USER CODE END RTOS_TIMERS */
 
   /* USER CODE BEGIN RTOS_QUEUES */
-  canTxQueue = osMessageQueueNew(8U, sizeof(MCP2515_CanMsg), NULL);
+  /* add queues, ... */
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
@@ -311,24 +356,19 @@ int main(void)
   defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
-  static const osThreadAttr_t sensorTx_attr = {
-    .name       = "SensorTx",
-    .stack_size = 256U * 4U,
-    .priority   = osPriorityNormal,
-  };
-  static const osThreadAttr_t canMgr_attr = {
-    .name       = "CANMgr",
+  static const osThreadAttr_t belt_attr = {
+    .name       = "BeltTask",
     .stack_size = 512U * 4U,
-    .priority   = osPriorityAboveNormal,
+    .priority   = osPriorityNormal,
   };
   static const osThreadAttr_t display_attr = {
     .name       = "Display",
     .stack_size = 512U * 4U,
     .priority   = osPriorityBelowNormal,
   };
-  osThreadNew(SensorTxTask,   NULL, &sensorTx_attr);
-  osThreadNew(CANManagerTask, NULL, &canMgr_attr);
-  osThreadNew(DisplayTask,    NULL, &display_attr);
+  if (osThreadNew(BeltTask,    NULL, &belt_attr)    == NULL ||
+      osThreadNew(DisplayTask, NULL, &display_attr) == NULL)
+    Error_Handler();
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
@@ -347,7 +387,6 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    HAL_Delay(1000);
   }
   /* USER CODE END 3 */
 }
@@ -491,16 +530,13 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8|GPIO_PIN_9, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10|GPIO_PIN_8|GPIO_PIN_9, GPIO_PIN_RESET);
 
-  /* **[추가된 설정]** 부팅 시 릴레이의 초기 출력 레벨 설정 (Active Low 기준 초기 OFF 상태 유지) */
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_SET);
-
-  /*Configure GPIO pin : B1_Pin */
-  GPIO_InitStruct.Pin = B1_Pin;
+  /*Configure GPIO pin : PC13 */
+  GPIO_InitStruct.Pin = GPIO_PIN_13;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
   /*Configure GPIO pin : PA4 */
   GPIO_InitStruct.Pin = GPIO_PIN_4;
@@ -509,143 +545,43 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PB0 PB1 */
-  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1;
+  /*Configure GPIO pin : PB0 */
+  GPIO_InitStruct.Pin = GPIO_PIN_0;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PB8 PB9 */
-  GPIO_InitStruct.Pin = GPIO_PIN_8|GPIO_PIN_9;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
-  /* **[추가된 설정]** PB10 (릴레이 제어 핀) GPIO 설정 */
-  GPIO_InitStruct.Pin = GPIO_PIN_10;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
-  /* USER CODE BEGIN MX_GPIO_Init_2 */
-  /* CS pin must start HIGH (inactive) — CubeMX generates RESET incorrectly */
-  HAL_GPIO_WritePin(MCP2515_CS_GPIO_Port, MCP2515_CS_Pin, GPIO_PIN_SET);
-
-  /* Re-apply pull-ups for INT (PB0) and SENSOR (PB1) */
-  GPIO_InitStruct.Pin  = MCP2515_INT_Pin | SENSOR_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  /*Configure GPIO pin : PB1 */
+  GPIO_InitStruct.Pin = GPIO_PIN_1;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : PB10 PB8 PB9 */
+  GPIO_InitStruct.Pin = GPIO_PIN_10|GPIO_PIN_8|GPIO_PIN_9;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI1_IRQn, 6, 0);
+  HAL_NVIC_EnableIRQ(EXTI1_IRQn);
+
+  /* USER CODE BEGIN MX_GPIO_Init_2 */
+  /* CubeMX configures PC13 as EXTI; reconfigure as plain input for polling */
+  GPIO_InitStruct.Pin  = B1_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
+
+  /* Set actuator1 default position (backward) */
+  HAL_GPIO_WritePin(ACT1_IN2_GPIO_Port, ACT1_IN2_Pin, GPIO_PIN_SET);
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
-static void SensorTxTask(void *argument)
-{
-  (void)argument;
-  bool     last_sensor  = false;
-  uint32_t last_tx_tick = 0U;
 
-  osMutexAcquire(stateMutex, osWaitForever);
-  node_states[g_node_id].valid = true;
-  osMutexRelease(stateMutex);
-
-  for (;;)
-  {
-    bool     sensor_now = ReadSensor();
-    uint32_t now        = osKernelGetTickCount();
-
-    osMutexAcquire(stateMutex, osWaitForever);
-    node_states[g_node_id].sensor = sensor_now;
-    osMutexRelease(stateMutex);
-
-    if (sensor_now != last_sensor || (now - last_tx_tick) >= 200U)
-    {
-      last_sensor  = sensor_now;
-      last_tx_tick = now;
-
-      MCP2515_CanMsg msg = {
-          .id       = CAN_ID_BASE + g_node_id,
-          .dlc      = 1U,
-          .data     = {sensor_now ? 0x01U : 0x00U},
-          .extended = false,
-      };
-      osMessageQueuePut(canTxQueue, &msg, 0U, 0U);
-    }
-    osDelay(50U);
-  }
-}
-
-static void CANManagerTask(void *argument)
-{
-  (void)argument;
-
-  for (;;)
-  {
-    MCP2515_CanMsg tx_msg;
-    if (osMessageQueueGet(canTxQueue, &tx_msg, NULL, 0U) == osOK)
-    {
-      osMutexAcquire(spiMutex, osWaitForever);
-      if (MCP2515_Send(&hmcp2515, &tx_msg) != HAL_OK)
-      {
-        MCP2515_RecoverBus(&hmcp2515);
-      }
-      osMutexRelease(spiMutex);
-    }
-
-    MCP2515_CanMsg rx_msg = {0};
-    osMutexAcquire(spiMutex, osWaitForever);
-    HAL_StatusTypeDef rx_status = MCP2515_Receive(&hmcp2515, &rx_msg, 5U);
-    osMutexRelease(spiMutex);
-
-    if (rx_status == HAL_OK)
-    {
-      uint32_t src = rx_msg.id - CAN_ID_BASE;
-      if (src >= 1U && src <= NODE_COUNT && src != (uint32_t)g_node_id && rx_msg.dlc >= 1U)
-      {
-        osMutexAcquire(stateMutex, osWaitForever);
-        node_states[src].sensor = (rx_msg.data[0] != 0U);
-        node_states[src].valid  = true;
-        osMutexRelease(stateMutex);
-      }
-    }
-
-    osDelay(5U);
-  }
-}
-
-static void DisplayTask(void *argument)
-{
-  (void)argument;
-  NodeState snapshot[NODE_COUNT + 1U];
-
-  for (;;)
-  {
-    osMutexAcquire(stateMutex, osWaitForever);
-    for (uint8_t i = 0U; i <= NODE_COUNT; i++)
-      snapshot[i] = node_states[i];
-    osMutexRelease(stateMutex);
-
-    for (uint8_t i = 1U; i <= NODE_COUNT; i++)
-    {
-      const char *label;
-      if (!snapshot[i].valid)
-        label = "---";
-      else
-        label = snapshot[i].sensor ? "DETECTED" : "CLEAR";
-
-      if (i == 1U)
-        printf("N%u[%-8s]", i, label);
-      else
-        printf(" N%u[%-8s]", i, label);
-    }
-    printf("\r\n");
-
-    osDelay(500U);
-  }
-}
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN Header_StartDefaultTask */
@@ -658,113 +594,10 @@ static void DisplayTask(void *argument)
 void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN 5 */
-
-  // 시스템 상태를 관리하는 열거형
-  typedef enum {
-    STAGE_FORWARD,       // 평상시: 컨베이어 작동 + 5초 전진
-    STAGE_BACKWARD,      // 평상시: 컨베이어 작동 + 5초 후진
-    STAGE_EMERGENCY_LOCK // 비상 상황: 컨베이어 정지 + 10초 강제 후진
-  } ActuatorStage;
-
-  ActuatorStage current_stage = STAGE_FORWARD;
-  uint32_t stage_start_tick = osKernelGetTickCount();
-
+  /* BeltTask handles the actual belt state machine. This task idles. */
   for (;;)
   {
-    bool detected = ReadSensor();
-    uint32_t current_tick = osKernelGetTickCount();
-
-    /* =============================================================
-     * 1. 상태 및 타이머 제어 로직 (State Machine)
-     * ============================================================= */
-    if (current_stage == STAGE_EMERGENCY_LOCK)
-    {
-      // [비상 모드] 벨트가 멈추고 액추에이터가 후진하는 중... 5초 체크
-      if ((current_tick - stage_start_tick) >= 5000U)
-      {
-        // 10초가 지났고, 센서 앞에 장애물도 완전히 청소되었다면 평상시로 복귀
-        if (!ReadSensor())
-        {
-          current_stage = STAGE_FORWARD;
-          stage_start_tick = current_tick;
-          printf("[SYSTEM] Emergency Clear! Belt RESTART / Actuator FORWARD\r\n");
-        }
-        else
-        {
-          // 10초가 지났는데도 여전히 물체가 감지 중이라면 비상 상태(후진/벨트정지) 연장
-          stage_start_tick = current_tick;
-          printf("[SYSTEM] Obstacle still remains. Extending Emergency...\r\n");
-        }
-      }
-    }
-    else
-    {
-      // [평상시 모드] 컨베이어가 잘 돌고 있는 와중에 물체가 감지되면 즉시 비상 모드 진입
-      if (detected)
-      {
-        current_stage = STAGE_EMERGENCY_LOCK;
-        stage_start_tick = current_tick; // 10초 카운트다운 시작
-        printf("[ALERT] Obstacle Detected! Conveyor STOP / Actuator Emergency Backward\r\n");
-      }
-      else
-      {
-        // 평상시: 컨베이어 벨트는 계속 도는 와중에, 액추에이터만 5초 간격 교대 작동
-        if ((current_tick - stage_start_tick) >= 5000U)
-        {
-          if (current_stage == STAGE_FORWARD)
-          {
-            current_stage = STAGE_BACKWARD;
-            printf("[NORMAL] 5s passed. Actuator -> BACKWARD (Conveyor Running)\r\n");
-          }
-          else
-          {
-            current_stage = STAGE_FORWARD;
-            printf("[NORMAL] 5s passed. Actuator -> FORWARD (Conveyor Running)\r\n");
-          }
-          stage_start_tick = current_tick;
-        }
-      }
-    }
-
-    /* =============================================================
-     * 2. 하드웨어 출력 제어 (릴레이 및 L298N 드라이빙)
-     * ============================================================= */
-    if (current_stage == STAGE_EMERGENCY_LOCK)
-    {
-      /* -----------------------------------------------------------
-       * [비상 상황] 컨베이어 벨트 즉시 정지 & 액추에이터 10초 후진
-       * ----------------------------------------------------------- */
-      // Active High 릴레이 기준: LOW = 릴레이 완전히 OFF (컨베이어 정지)
-      HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_RESET);
-
-      // L298N 모터 드라이버 후진 신호 인가
-      HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_RESET);  // IN1 = LOW
-      HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_SET);    // IN2 = HIGH
-    }
-    else
-    {
-      /* -----------------------------------------------------------
-       * [평상시] 컨베이어 벨트 무조건 작동 (ON) & 액추에이터 5초 교대
-       * ----------------------------------------------------------- */
-      // Active High 릴레이 기준: HIGH = 릴레이 항상 ON (컨베이어 계속 작동)
-      HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_SET);
-
-      if (current_stage == STAGE_FORWARD)
-      {
-        // 5초 동안 전진 구동
-        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_SET);   // IN1 = HIGH
-        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_RESET); // IN2 = LOW
-      }
-      else
-      {
-        // 5초 동안 후진 구동
-        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_RESET); // IN1 = LOW
-        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_SET);   // IN2 = HIGH
-      }
-    }
-
-    // 50ms 주기로 센서 및 타이머 상태를 매우 빠르게 스캔
-    osDelay(50U);
+    osDelay(osWaitForever);
   }
   /* USER CODE END 5 */
 }
@@ -808,7 +641,7 @@ void Error_Handler(void)
 #ifdef USE_FULL_ASSERT
 /**
   * @brief  Reports the name of the source file and the source line number
-  * where the assert_param error has occurred.
+  *         where the assert_param error has occurred.
   * @param  file: pointer to the source file name
   * @param  line: assert_param error line source number
   * @retval None

@@ -9,20 +9,23 @@ DEVICES = [
         "name": "turtlebot1",
         "host": "192.168.100.150",
         "user": "wapple",
-        "script": "bash -i -c 'bringup'"
+        "script": "bash -i -c 'bringup'",
+        "kill_target": "robot.launch.py"
     },
     {
         "name": "turtlebot2",
         "host": "192.168.100.149",
         "user": "waffle",
-        "script": "bash -i -c 'bringup'"
+        "script": "bash -i -c 'bringup'",
+        "kill_target": "robot.launch.py"
     },
-    # {
-    #     "name": "raspberry",
-    #     "host": "192.168.100.101",
-    #     "user": "rapi23",
-    #     "script": "source ~/proj/venv/bin/activate && python3 ~/proj/GPIO/stepper.py"
-    # },
+    {
+        "name": "raspberry",
+        "host": "192.168.100.101",
+        "user": "rapi23",
+        "script": "source ~/pro/bin/activate && python3 ~/proj/GPIO/stepper.py",
+        "kill_target": "stepper.py" 
+    },
 ]
 
 sessions = []
@@ -51,7 +54,7 @@ def ssh_run(device):
         print(f"[{device['name']}] SSH 접속 성공")
 
         stdin, stdout, stderr = ssh.exec_command(device["script"], get_pty=True)
-        sessions.append((device["name"], ssh, stdin))
+        sessions.append((device, ssh, stdin))
         print(f"[{device['name']}] 실행 시작!")
 
         # 로그출력
@@ -80,24 +83,26 @@ def launch_all(on_all_ready=None):
 
 def kill_all():
     print("모든 기기 종료 중...")
-    for name, ssh, stdin in sessions:
+    for device, ssh, stdin in sessions:
+        name = device["name"]
+        target = device["kill_target"]  # ← 기기별 종료 대상 사용
         try:
             # SIGINT 전송
-            ssh.exec_command("pkill -SIGINT -f 'robot.launch.py'")
+            ssh.exec_command(f"pkill -SIGINT -f '{target}'")
             
-            # 꺼졌는지 확인 (최대 5번 시도)
+            # 꺼졌는지 확인
             while True:
                 time.sleep(5)
-                _, stdout, _ = ssh.exec_command("pgrep -f 'robot.launch.py'")
+                _, stdout, _ = ssh.exec_command(f"pgrep -f '{target}'")
                 stdout.channel.recv_exit_status()
                 result = stdout.read().decode().strip()
                 
-                if not result:  # 프로세스 없으면 종료됨
+                if not result:
                     print(f"[{name}] 종료 완료")
                     break
                 else:
                     print(f"[{name}] 아직 실행 중... SIGINT 재전송")
-                    ssh.exec_command("pkill -SIGINT -f 'robot.launch.py'")
+                    ssh.exec_command(f"pkill -SIGINT -f '{target}'")
             
             ssh.close()
         except Exception as e:
