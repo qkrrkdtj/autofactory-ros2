@@ -22,6 +22,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "mcp2515.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
@@ -55,6 +56,8 @@ const osThreadAttr_t defaultTask_attributes = {
   .priority = (osPriority_t) osPriorityNormal,
 };
 /* USER CODE BEGIN PV */
+MCP2515_HandleTypeDef hmcp2515;
+
 BeltStatus g_belt_status;
 
 osMutexId_t beltMutex;
@@ -87,6 +90,11 @@ static void HandleObstacleDetected(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+int __io_putchar(int ch)
+{
+  HAL_UART_Transmit(&huart2, (uint8_t *)&ch, 1, HAL_MAX_DELAY);
+  return ch;
+}
 
 bool ReadSensor(void)
 {
@@ -236,6 +244,8 @@ static void BeltTask(void *argument)
             HandleObstacleDetected();
 
             sensor_active = true;
+            HAL_GPIO_WritePin(RELAY_GPIO_Port, RELAY_Pin, GPIO_PIN_SET);
+            osDelay(SENSOR_REARM_DELAY_MS);
             SensorMonitoring_Enable();
           }
           else
@@ -326,7 +336,26 @@ int main(void)
   MX_USART2_UART_Init();
   MX_SPI1_Init();
   /* USER CODE BEGIN 2 */
+  setvbuf(stdout, NULL, _IONBF, 0);
   HAL_Delay(500U);
+
+  hmcp2515.hspi    = &hspi1;
+  hmcp2515.cs_port = MCP2515_CS_GPIO_Port;
+  hmcp2515.cs_pin  = MCP2515_CS_Pin;
+  hmcp2515.osc_hz  = MCP2515_OSC_8MHZ;
+
+  printf("\r\n=== 1st Board CAN Ping Test ===\r\n");
+  if (MCP2515_AutoDetectOsc(&hmcp2515) != HAL_OK)
+  {
+    printf("[CAN] MCP2515 init FAILED\r\n");
+    MCP2515_PrintDiag(&hmcp2515);
+  }
+  else
+  {
+    MCP2515_SetNormalMode(&hmcp2515);
+    printf("[CAN] MCP2515 ready (%lu MHz) -> TX ID=0x001\r\n",
+           (unsigned long)(hmcp2515.osc_hz / 1000000U));
+  }
   /* USER CODE END 2 */
 
   /* Init scheduler */
@@ -577,6 +606,15 @@ static void MX_GPIO_Init(void)
 
   /* Set actuator1 default position (backward) */
   HAL_GPIO_WritePin(ACT1_IN2_GPIO_Port, ACT1_IN2_Pin, GPIO_PIN_SET);
+
+  /* CS must be HIGH (inactive) before first SPI transaction */
+  HAL_GPIO_WritePin(MCP2515_CS_GPIO_Port, MCP2515_CS_Pin, GPIO_PIN_SET);
+
+  /* Re-apply PULLUP for INT (PB0) */
+  GPIO_InitStruct.Pin  = MCP2515_INT_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(MCP2515_INT_GPIO_Port, &GPIO_InitStruct);
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
@@ -594,10 +632,45 @@ static void MX_GPIO_Init(void)
 void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN 5 */
-  /* BeltTask handles the actual belt state machine. This task idles. */
+  (void)argument;
+  uint8_t  tx_counter = 0U;
+  uint32_t last_tx    = 0U;
+
   for (;;)
   {
-    osDelay(osWaitForever);
+    uint32_t now = osKernelGetTickCount();
+
+    /* Send a ping frame every 1s */
+    if ((now - last_tx) >= 1000U)
+    {
+      last_tx = now;
+      tx_counter++;
+
+      MCP2515_CanMsg tx = {
+        .id       = 0x001U,
+        .dlc      = 2U,
+        .data     = {0x01U, tx_counter},
+        .extended = false,
+      };
+      HAL_StatusTypeDef s = MCP2515_Send(&hmcp2515, &tx);
+      printf("[TX] ID=0x001 data=[01 %02X] %s\r\n",
+             tx_counter, s == HAL_OK ? "OK" : "FAIL");
+      if (s != HAL_OK)
+        MCP2515_PrintDiag(&hmcp2515);
+    }
+
+    /* Poll for incoming frames */
+    MCP2515_CanMsg rx = {0};
+    if (MCP2515_Receive(&hmcp2515, &rx, 5U) == HAL_OK)
+    {
+      printf("[RX] ID=0x%03lX dlc=%u data=[",
+             (unsigned long)rx.id, rx.dlc);
+      for (uint8_t i = 0U; i < rx.dlc; i++)
+        printf("%02X%s", rx.data[i], i < rx.dlc - 1U ? " " : "");
+      printf("]\r\n");
+    }
+
+    osDelay(50U);
   }
   /* USER CODE END 5 */
 }

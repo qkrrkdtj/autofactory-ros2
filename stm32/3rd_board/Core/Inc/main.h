@@ -61,9 +61,6 @@ typedef struct
 void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
-extern uint8_t   g_node_id;
-extern NodeState node_states[NODE_COUNT + 1U];
-bool ReadSensor(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/

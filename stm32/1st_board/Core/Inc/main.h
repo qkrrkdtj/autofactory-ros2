@@ -52,12 +52,13 @@ typedef struct
 #define BELT_STATE_STOPPED    0U
 #define BELT_STATE_RUNNING    1U
 
-#define UART_CMD_START     'S'
-#define UART_RSP_OK        'O'
-#define UART_RSP_NG        'N'
-#define UART_PI_DELAY_MS   500U
-#define UART_RX_TIMEOUT_MS 1000U
-#define PI_RSP_LOG_SIZE    16U
+#define UART_CMD_START        'S'
+#define UART_RSP_OK           'O'
+#define UART_RSP_NG           'N'
+#define UART_PI_DELAY_MS      500U
+#define UART_RX_TIMEOUT_MS    1000U
+#define PI_RSP_LOG_SIZE       16U
+#define SENSOR_REARM_DELAY_MS 800U
 /* USER CODE END EC */
 
 /* Exported macro ------------------------------------------------------------*/
@@ -97,6 +98,10 @@ bool ReadSensor(void);
 #define ACT1_IN1_GPIO_Port GPIOB
 #define ACT1_IN2_Pin       GPIO_PIN_9
 #define ACT1_IN2_GPIO_Port GPIOB
+#define MCP2515_CS_Pin       GPIO_PIN_4
+#define MCP2515_CS_GPIO_Port GPIOA
+#define MCP2515_INT_Pin      GPIO_PIN_0
+#define MCP2515_INT_GPIO_Port GPIOB
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus
