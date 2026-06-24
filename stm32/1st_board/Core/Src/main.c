@@ -226,7 +226,7 @@ static void BeltTask(void *argument)
         break;
 
       case MACHINE_STAGE_RUNNING:
-        if (sensor_active && (g_sensor_triggered || ReadSensor()))
+        if (sensor_active && g_sensor_triggered)
         {
           if (Sensor_ConfirmDetected())
           {
@@ -238,7 +238,7 @@ static void BeltTask(void *argument)
             sensor_active = true;
             SensorMonitoring_Enable();
           }
-          else if (g_sensor_triggered)
+          else
           {
             g_sensor_triggered = false;
             SensorMonitoring_Enable();
