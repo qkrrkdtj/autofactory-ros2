@@ -2,107 +2,321 @@
 <html lang="ko">
 <head>
   <meta charset="UTF-8">
-  <title>🤖 로봇 미션 대시보드</title>
+  <title>로봇 미션 대시보드</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
   <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: 'Segoe UI', sans-serif;
-      background: #0f172a;
-      color: #e2e8f0;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      min-height: 100vh;
-      gap: 24px;
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0f172a; --surface: #1e293b; --surface2: #273348; --border: #334155;
+      --text: #e2e8f0; --text-muted: #94a3b8; --text-faint: #64748b;
+      --blue: #38bdf8; --blue-bg: rgba(56,189,248,0.08); --blue-border: rgba(56,189,248,0.3);
+      --green: #4ade80; --green-bg: rgba(74,222,128,0.08); --green-border: rgba(74,222,128,0.3);
+      --amber: #fbbf24; --amber-bg: rgba(251,191,36,0.08); --amber-border: rgba(251,191,36,0.3);
+      --red: #f87171; --red-bg: rgba(248,113,113,0.08); --red-border: rgba(248,113,113,0.3);
+      --radius: 10px; --radius-sm: 6px;
     }
-    h1 { font-size: 1.8rem; letter-spacing: 0.05em; color: #7dd3fc; }
-    .card {
-      background: #1e293b;
-      border: 1px solid #334155;
-      border-radius: 16px;
-      padding: 32px 48px;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 16px;
-      width: 380px;
-    }
-    .label { font-size: 0.85rem; color: #94a3b8; letter-spacing: 0.08em; }
-    button {
-      width: 100%;
-      padding: 14px;
-      border: none;
-      border-radius: 10px;
-      font-size: 1.1rem;
-      font-weight: 700;
-      cursor: pointer;
-      transition: opacity 0.2s, transform 0.1s;
-    }
-    button:active { transform: scale(0.97); }
-    button:disabled { opacity: 0.4; cursor: not-allowed; }
-    #btn-start  { background: #22c55e; color: #fff; }
-    .signal-btn { background: #f59e0b; color: #fff; flex: 1; }
-    .btn-group { display: flex; gap: 12px; width: 100%; }
-    #status {
-      font-size: 0.9rem;
-      color: #64748b;
-      min-height: 1.2em;
-      text-align: center;
-    }
-    .divider { width: 100%; border: none; border-top: 1px solid #334155; }
+    body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 32px 16px; gap: 20px; }
+    .topbar { width: 100%; max-width: 760px; display: flex; align-items: center; justify-content: space-between; }
+    .topbar-left { display: flex; align-items: center; gap: 10px; }
+    .topbar-left i { font-size: 22px; color: var(--blue); }
+    .topbar-title { font-size: 17px; font-weight: 600; color: var(--text); }
+    .topbar-sub { font-size: 12px; color: var(--text-faint); margin-top: 1px; }
+    .sys-badge { font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 20px; border: 1px solid var(--border); color: var(--text-muted); background: var(--surface); transition: all 0.2s; }
+    .sys-badge.ready { color: var(--green); background: var(--green-bg); border-color: var(--green-border); }
+    .sys-badge.running { color: var(--blue); background: var(--blue-bg); border-color: var(--blue-border); }
+    .sys-badge.stopped { color: var(--amber); background: var(--amber-bg); border-color: var(--amber-border); }
+    .panel { width: 100%; max-width: 760px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; display: flex; flex-direction: column; gap: 14px; }
+    .panel-label { font-size: 10px; font-weight: 700; letter-spacing: 0.1em; color: var(--text-faint); text-transform: uppercase; }
+    .robot-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .robot-card { background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; cursor: pointer; transition: border-color 0.15s, background 0.15s; user-select: none; }
+    .robot-card:hover { border-color: #475569; }
+    .robot-card.selected { border-color: var(--blue-border); background: var(--blue-bg); }
+    .robot-card-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+    .robot-name { font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+    .robot-name i { font-size: 16px; color: var(--text-muted); }
+    .robot-card.selected .robot-name i { color: var(--blue); }
+    .robot-check { width: 20px; height: 20px; border-radius: 50%; border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-size: 11px; color: transparent; transition: all 0.15s; }
+    .robot-card.selected .robot-check { background: var(--blue); border-color: var(--blue); color: #0f172a; }
+    .robot-status { font-size: 12px; color: var(--text-faint); display: flex; align-items: center; gap: 5px; }
+    .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--border); flex-shrink: 0; transition: background 0.3s; }
+    .dot.waiting { background: var(--amber); }
+    .dot.ready { background: var(--green); }
+    .dot.off { background: var(--border); }
+    .metric-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+    .metric-card { background: var(--surface2); border-radius: var(--radius-sm); padding: 12px 14px; }
+    .metric-val { font-size: 22px; font-weight: 700; color: var(--text); }
+    .metric-lbl { font-size: 11px; color: var(--text-faint); margin-top: 2px; }
+    .btn-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .btn { padding: 13px; border: 1px solid; border-radius: var(--radius-sm); font-size: 14px; font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 7px; transition: opacity 0.15s, transform 0.1s; }
+    .btn:active:not(:disabled) { transform: scale(0.97); }
+    .btn:disabled { opacity: 0.3; cursor: not-allowed; }
+    .btn-start { background: var(--green-bg); color: var(--green); border-color: var(--green-border); }
+    .btn-stop  { background: var(--red-bg);   color: var(--red);   border-color: var(--red-border); }
+    .btn-signal { background: var(--amber-bg); color: var(--amber); border-color: var(--amber-border); padding: 11px; }
+    .log-box { background: #0d1626; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 12px; min-height: 80px; max-height: 140px; overflow-y: auto; display: flex; flex-direction: column; gap: 3px; font-family: 'Consolas', 'Monaco', monospace; }
+    .log-entry { font-size: 12px; display: flex; gap: 10px; line-height: 1.5; }
+    .log-ts { color: var(--text-faint); flex-shrink: 0; }
+    .log-msg.info    { color: var(--blue); }
+    .log-msg.success { color: var(--green); }
+    .log-msg.warn    { color: var(--amber); }
+    .log-msg.error   { color: var(--red); }
   </style>
 </head>
 <body>
-  <h1>🤖 로봇 미션 대시보드</h1>
 
-  <div class="card">
-    <span class="label">MISSION CONTROL</span>
-    <button id="btn-start" onclick="sendStart()" disabled>▶ 미션 시작</button>
-
-    <hr class="divider">
-
-    <span class="label">EXTERNAL SIGNALS</span>
-    <div class="btn-group">
-      <button class="signal-btn" onclick="sendSignal('A')" disabled>✅ A 해제</button>
-      <button class="signal-btn" onclick="sendSignal('C')" disabled>✅ C 해제</button>
+  <div class="topbar">
+    <div class="topbar-left">
+      <i class="ti ti-robot"></i>
+      <div>
+        <div class="topbar-title">미션 관리 대시보드</div>
+        <div class="topbar-sub">AutoFactory ROS2 Control System</div>
+      </div>
     </div>
-
-    <p id="status">대기 중...</p>
+    <span class="sys-badge" id="sys-badge">대기 중</span>
   </div>
 
-  <script>
-    
-    async function sendStart() {
-      document.getElementById('btn-start').disabled = true;
-      const res = await fetch('/start', { method: 'POST' });
-      const data = await res.json();
-      setStatus(data.message, '#22c55e');
-      
-      // 시작 후 A, C 신호 버튼 모두 활성화
-      document.querySelectorAll('.signal-btn').forEach(btn => btn.disabled = false);
-    }
+  <div class="panel">
+    <div class="panel-label">로봇 선택</div>
+    <div class="robot-grid">
+      <div class="robot-card selected" id="card-1" onclick="toggleRobot(1)">
+        <div class="robot-card-top">
+          <div class="robot-name"><i class="ti ti-device-gamepad-2"></i> Waffle 1</div>
+          <div class="robot-check" id="check-1"><i class="ti ti-check"></i></div>
+        </div>
+        <div class="robot-status">
+          <span class="dot waiting" id="dot-1"></span>
+          <span id="rstatus-1">keepout 대기 중</span>
+        </div>
+      </div>
+      <div class="robot-card selected" id="card-2" onclick="toggleRobot(2)">
+        <div class="robot-card-top">
+          <div class="robot-name"><i class="ti ti-device-gamepad-2"></i> Waffle 2</div>
+          <div class="robot-check" id="check-2"><i class="ti ti-check"></i></div>
+        </div>
+        <div class="robot-status">
+          <span class="dot waiting" id="dot-2"></span>
+          <span id="rstatus-2">keepout 대기 중</span>
+        </div>
+      </div>
+    </div>
+  </div>
 
-    async function sendSignal(wp) {
+  <div class="panel">
+    <div class="panel-label">시스템 상태</div>
+    <div class="metric-row">
+      <div class="metric-card">
+        <div class="metric-val" id="m-active">0 / 0</div>
+        <div class="metric-lbl">활성 로봇</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-val" id="m-ready">0 / 0</div>
+        <div class="metric-lbl">keepout 준비</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-val" id="m-mission">대기</div>
+        <div class="metric-lbl">미션 상태</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-label">미션 제어</div>
+    <div class="btn-row">
+      <button class="btn btn-start" id="btn-start" onclick="sendStart()" disabled>
+        <i class="ti ti-player-play"></i> 미션 시작
+      </button>
+      <button class="btn btn-stop" id="btn-pause" onclick="togglePause()" disabled>
+        <i class="ti ti-player-pause"></i> 미션 정지
+      </button>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-label">외부 신호</div>
+    <div class="btn-row">
+      <button class="btn btn-signal" id="btn-a" onclick="sendSignal('A')" disabled>
+        <i class="ti ti-lock-open"></i> A 구역 해제
+      </button>
+      <button class="btn btn-signal" id="btn-c" onclick="sendSignal('C')" disabled>
+        <i class="ti ti-lock-open"></i> C 구역 해제
+      </button>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-label">시스템 로그</div>
+    <div class="log-box" id="log-box"></div>
+  </div>
+
+<script>
+  // state에 keepout 상태 추가 및 paused 추가
+  const state = { selected: [true, true], keepout: [false, false], running: false, paused: false };
+
+  function ts() { return new Date().toTimeString().slice(0, 8); }
+
+  function addLog(msg, type = 'info') {
+    const box = document.getElementById('log-box');
+    const el = document.createElement('div');
+    el.className = 'log-entry';
+    el.innerHTML = `<span class="log-ts">${ts()}</span><span class="log-msg ${type}">${msg}</span>`;
+    box.appendChild(el);
+    box.scrollTop = box.scrollHeight;
+  }
+
+  function updateUI() {
+    const selCount = state.selected.filter(Boolean).length;
+    const readyCount = state.selected.map((s, i) => s && state.keepout[i]).filter(Boolean).length;
+    const allReady = selCount > 0 && readyCount === selCount;
+
+    document.getElementById('m-active').textContent = `${selCount} / 2`;
+    document.getElementById('m-ready').textContent = `${readyCount} / ${selCount || 0}`;
+
+    const btnStart = document.getElementById('btn-start');
+    const btnPause = document.getElementById('btn-pause');
+
+    btnStart.disabled = !allReady || state.running;
+    btnPause.disabled = !state.running;
+
+    const badge = document.getElementById('sys-badge');
+    const missionEl = document.getElementById('m-mission');
+    
+    if (state.running) {
+      if (state.paused) {
+        badge.className = 'sys-badge stopped'; badge.textContent = '일시정지';
+        missionEl.textContent = '정지됨';
+        btnPause.className = 'btn btn-start'; 
+        btnPause.innerHTML = '<i class="ti ti-player-play"></i> 미션 재개';
+      } else {
+        badge.className = 'sys-badge running'; badge.textContent = '운영 중';
+        missionEl.textContent = '실행 중';
+        btnPause.className = 'btn btn-stop'; 
+        btnPause.innerHTML = '<i class="ti ti-player-pause"></i> 미션 정지';
+      }
+    } else if (allReady) {
+      badge.className = 'sys-badge ready'; badge.textContent = '준비 완료';
+      missionEl.textContent = '준비';
+    } else {
+      badge.className = 'sys-badge'; badge.textContent = '대기 중';
+      missionEl.textContent = '대기';
+    }
+  }
+
+  function toggleRobot(idx) {
+    if(state.running)
+    {
+        addLog(
+          "미션 시작 후 로봇 변경 불가",
+          "warn"
+        );
+        return;
+    }
+    const i = idx - 1;
+    state.selected[i] = !state.selected[i];
+
+    const card = document.getElementById(`card-${idx}`);
+    const dot = document.getElementById(`dot-${idx}`);
+    const statusEl = document.getElementById(`rstatus-${idx}`);
+
+    if (state.selected[i]) {
+      card.classList.add('selected');
+      if (state.keepout[i]) {
+        dot.className = 'dot ready';
+        statusEl.textContent = 'keepout 준비 완료';
+      } else {
+        dot.className = 'dot waiting';
+        statusEl.textContent = 'keepout 대기 중';
+      }
+      addLog(`Waffle ${idx} 활성화됨`, 'info');
+    } else {
+      card.classList.remove('selected');
+      dot.className = 'dot off';
+      statusEl.textContent = '비활성화됨';
+      addLog(`Waffle ${idx} 비활성화됨`, 'warn');
+    }
+    updateUI();
+  }
+
+  function markReady(idx) {
+    const i = idx - 1;
+    if (state.keepout[i]) return;  // 이미 처리됨 — 중복 무시
+    state.keepout[i] = true;
+    if (state.selected[i]) {
+      document.getElementById(`dot-${idx}`).className = 'dot ready';
+      document.getElementById(`rstatus-${idx}`).textContent = 'keepout 준비 완료';
+      addLog(`Waffle ${idx} keepout 필터 확인됨`, 'success');
+    }
+    updateUI();
+  }
+
+  async function sendStart() {
+    const selectedRobots = [];
+    if (state.selected[0]) selectedRobots.push(1);
+    if (state.selected[1]) selectedRobots.push(2);
+
+    try {
+      const res = await fetch('/start', { 
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ selected: selectedRobots })
+      });
+      const data = await res.json();
+      if (data.status === 'ok' || data.status === 'already') {
+        state.running = true;
+        state.paused = false;
+        document.querySelectorAll('#btn-a, #btn-c').forEach(b => b.disabled = false);
+        addLog('미션 시작됨 — ' + (data.message || ''), 'success');
+        updateUI();
+        connectLogStream();
+      } else {
+        addLog('미션 시작 불가: ' + data.message, 'error');
+      }
+    } catch (e) { addLog('미션 시작 실패: ' + e.message, 'error'); }
+  }
+
+  // 일시정지 / 재개 통신
+  async function togglePause() {
+    if (!state.running) return;
+    const endpoint = state.paused ? '/resume' : '/pause';
+    try {
+      const res = await fetch(endpoint, { method: 'POST' });
+      const data = await res.json();
+      state.paused = !state.paused;
+      addLog(data.message, state.paused ? 'warn' : 'success');
+      updateUI();
+    } catch (e) { addLog('명령 실패: ' + e.message, 'error'); }
+  }
+
+  async function sendSignal(wp) {
+    try {
       const res = await fetch(`/signal/${wp}`, { method: 'POST' });
       const data = await res.json();
-      setStatus(data.message, '#f59e0b');
-    }
+      addLog(`신호 전송 [${wp}] — ` + (data.message || ''), 'warn');
+    } catch (e) { addLog(`신호 전송 실패 [${wp}]: ` + e.message, 'error'); }
+  }
 
-    function setStatus(msg, color) {
-      const el = document.getElementById('status');
-      el.textContent = msg;
-      el.style.color = color;
-    }
-    
-    const evtSource = new EventSource('/ready_stream');
-    evtSource.onmessage = function(e) {
-        if (e.data === 'ready') {
-            document.getElementById('btn-start').disabled = false;
-            setStatus('모든 기기 준비 완료! 시작 버튼을 누르세요.', '#22c55e');
-            evtSource.close();
-        }
+  const evtSource = new EventSource('/ready_stream');
+  evtSource.onmessage = function (e) {
+    if (e.data === 'ready_1') markReady(1);
+    if (e.data === 'ready_2') markReady(2);
+    // 둘 다 완료되면 재연결 방지를 위해 스트림 닫기
+    if (state.keepout[0] && state.keepout[1]) evtSource.close();
+  };
+  evtSource.onerror = function () {};
+
+  // ── 미션 실시간 로그 스트림 ──
+  function connectLogStream() {
+    const logSource = new EventSource('/log_stream');
+    logSource.onmessage = function (e) {
+      try { const entry = JSON.parse(e.data); addLog(entry.msg, entry.level); } catch (_) {}
     };
-  </script>
+    logSource.onerror = function () {
+      logSource.close();
+      if (state.running) setTimeout(connectLogStream, 2000);
+    };
+  }
+
+  addLog('시스템 초기화 완료. keepout 필터 대기 중.', 'info');
+  updateUI();
+</script>
 </body>
 </html>
