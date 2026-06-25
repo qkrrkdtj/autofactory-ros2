@@ -120,8 +120,8 @@ int main(void)
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);
 
   // 보드가 처음 켜졌을 때 안전 초기화 위치 설정 (하드웨어 기계적 락 방지 마진 반영)
-  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 600);   // 서보 1번: 대기 위치 (약 0도 부근)
-  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, 2400);  // ⭐ 서보 2번: 원상태인 정회전 끝(약 180도 부근) 위치 대기
+  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 2300);   // 서보 1번: 대기 위치 (약 0도 부근)
+  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, 1000);  // ⭐ 서보 2번: 원상태인 정회전 끝(약 180도 부근) 위치 대기
 
   // L298N 액추에이터 초기 정지 상태
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_3, GPIO_PIN_RESET);
@@ -204,17 +204,15 @@ int main(void)
 
       if (cap_processed == 0)
       {
-    	  // 1. 서보모터 1번: 0도 대기(600) 상태에서 -> 거의 최대 각도(2200)로 확 꺾기
-    	  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 2200);
-    	  HAL_Delay(1000);
+
 
     	  // 2. 서보모터 2번: 180도 대기(2400) 상태에서 -> 완전히 반대쪽 끝(800)으로 확 제끼기
-    	  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, 800);
-    	  HAL_Delay(1000);
+    	  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 800);
+    	  HAL_Delay(2000);
 
     	  // 3. 서보모터 2번 미세 조절 (필요 없으면 이 단계를 지우거나 값 조정)
-    	  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, 1400);
-    	  HAL_Delay(800);
+    	  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 2300);
+    	  HAL_Delay(2000);
 
         // 4. L298N 제어: 액추에이터 6초 전진 (IN1=HIGH, IN2=LOW)
         HAL_GPIO_WritePin(GPIOC, GPIO_PIN_3, GPIO_PIN_SET);
@@ -230,12 +228,18 @@ int main(void)
         HAL_GPIO_WritePin(GPIOC, GPIO_PIN_3, GPIO_PIN_RESET);
         HAL_GPIO_WritePin(GPIOC, GPIO_PIN_4, GPIO_PIN_RESET);
 
-        // 7. 시퀀스 완료 후 원상태 복귀값 인가
-        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 600);  // 서보 1번 초기화
-        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, 2400); // 서보 2번 원상태 복귀 (정회전 끝 마진 반영)
+	    // 7. 서보모터 1번: 0도 대기(600) 상태에서 -> 거의 최대 각도(2200)로 확 꺾기
+	    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, 1500);
+		HAL_Delay(2000);
+
+        // 8. 시퀀스 완료 후 원상태 복귀값 인가
+        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 2300);  // 서보 1번 초기화
+        HAL_Delay(2000);
+        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, 1000); // 서보 2번 원상태 복귀 (정회전 끝 마진 반영)
         HAL_Delay(1000); // 복귀 완료를 위한 대기시간
 
         cap_processed = 1;
+
       }
     }
     else // ⭐ [HIGH]: 뚜껑 센서 미감지 ➡️ 대기 상태
@@ -246,8 +250,8 @@ int main(void)
         HAL_UART_Transmit(&huart2, (uint8_t *)msg, strlen(msg), 100);
 
         // 무한 반복 호출로 모터 제어 레지스터 회로가 먹통이 되는 버그 방지 (상태 변화 시 딱 한 번만 펄스 갱신)
-        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 600);   // 서보 1번 평상시 위치
-        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, 2400);  // ⭐ 서보 2번 원상태 고정
+        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 2300);   // 서보 1번 평상시 위치
+        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, 1000);  // ⭐ 서보 2번 원상태 고정
       }
 
       cap_processed = 0; // 플래그 초기화

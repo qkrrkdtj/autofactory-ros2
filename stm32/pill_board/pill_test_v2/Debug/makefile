@@ -60,8 +60,8 @@ all: main-build
 main-build: test_v2.elf secondary-outputs
 
 # Tool invocations
-test_v2.elf test_v2.map: $(OBJS) $(USER_OBJS) /home/jihohan/Desktop/finalproject/stm32/pill_board/pill_test_v2/STM32F411RETX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-gcc -o "test_v2.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m4 -T"/home/jihohan/Desktop/finalproject/stm32/pill_board/pill_test_v2/STM32F411RETX_FLASH.ld" --specs=nosys.specs -Wl,-Map="test_v2.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
+test_v2.elf test_v2.map: $(OBJS) $(USER_OBJS) /home/user/autofactory-ros2/stm32/pill_board/pill_test_v2/STM32F411RETX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-gcc -o "test_v2.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m4 -T"/home/user/autofactory-ros2/stm32/pill_board/pill_test_v2/STM32F411RETX_FLASH.ld" --specs=nosys.specs -Wl,-Map="test_v2.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
 	@echo 'Finished building target: $@'
 	@echo ' '
 
