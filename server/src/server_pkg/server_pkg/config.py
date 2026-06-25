@@ -38,7 +38,7 @@ OMX_CONFIGS = {
         "port": 9002,
 
         # ---- 역할 ----
-        "policy_name": "classify1_ep0_316",   # 분류 정책 (로그/메시지용 짧은 이름)
+        "policy_name": "classify1_ep0_496",   # 분류 정책 (로그/메시지용 짧은 이름)
         "role": "sorting",
 
         # ---- 로봇 실행 관련 (OMX2 PC 로컬에서만 사용) ----
@@ -71,8 +71,8 @@ JOINT_KEYS = [
 ]
 
 # 로봇 실행 관련 안전/타이밍 설정
-HOME_THRESHOLD = 2.0       # degree, 이 값 이내면 home 도달로 판정
-MAX_EPISODE_STEPS = 10000    # policy 한 사이클의 최대 스텝 수 (안전망)
+HOME_THRESHOLD = 5.0       # degree, 이 값 이내면 home 도달로 판정
+MAX_EPISODE_STEPS = 3000    # policy 한 사이클의 최대 스텝 수 (안전망)
 HOMING_TIMEOUT = 25.0       # home 복귀 시도 최대 시간(초). 넘으면 실패 처리
 STEP_DELAY = 0.03           # 각 스텝 사이 대기 시간(초)
 
