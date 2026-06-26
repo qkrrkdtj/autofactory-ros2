@@ -1,7 +1,6 @@
 # 대시보드 현황
 
-
-![alt text](<Screenshot from 2026-06-26 16-22-12.png>)
+![alt text](../docs/images/dashboard.png)
 
 ## 가능한 기능
 
