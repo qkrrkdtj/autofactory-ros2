@@ -4,17 +4,17 @@ from rclpy.node import Node
 from rclpy.action import ActionServer, ActionClient
 from rclpy.executors import MultiThreadedExecutor
 from action_msgs.msg import GoalStatus
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Twist, PoseWithCovarianceStamped  # PoseWithCovarianceStamped 추가
 from server_pkg.modi_mission_manager import MissionManager, start_mission
 from server_pkg.omx_link import OmxConnection
 from server_pkg.ssh_launcher import launch_all, kill_all
 import threading
+import math
 import time
 import sys
 import os
 import asyncio
-import time
-
+import json  # JSON 추가
 
 from nav2_msgs.action import NavigateToPose
 from flask import Flask, request, jsonify
@@ -77,31 +77,58 @@ class ActionProxy:
         return result_wrapper.result
 
     def cancel_current_goal(self):
-        # ── Nav2 goal cancel 즉시 ──
         if self.active_client_goal_handle:
             self.active_client_goal_handle.cancel_goal_async()
-        # ── cmd_vel 0 즉시 1회 발행 (blocking 없음) ──
         self.cmd_vel_pub.publish(Twist())
-        # ── 이후 타이머(0.1s)가 계속 0을 발행하도록 플래그 세팅 ──
         self._wants_pause = True
 
 
 # ==========================================
-# 2. Flask 앱 (kill_all 제거, pause/resume 교체)
+# 1.5. 실시간 위치 추적 (Pose Tracker) - NEW
+# ==========================================
+class PoseTracker:
+    def __init__(self, robot_node, robot_id, shared_pose_state):
+        self.robot_node = robot_node
+        self.robot_id = robot_id
+        self.shared_pose_state = shared_pose_state
+        
+        # amcl_pose를 구독하여 맵 상의 위치 획득 (터틀봇/Nav2 기본 토픽)
+        self.sub = self.robot_node.create_subscription(
+            PoseWithCovarianceStamped,
+            'amcl_pose',
+            self.pose_callback,
+            10
+        )
+
+    def pose_callback(self, msg):
+        x = msg.pose.pose.position.x
+        y = msg.pose.pose.position.y
+        # 쿼터니언에서 yaw(평면 회전각, 라디안) 추출
+        q = msg.pose.pose.orientation
+        yaw = math.atan2(
+            2.0 * (q.w * q.z + q.x * q.y),
+            1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+        )
+        self.shared_pose_state[self.robot_id] = {'x': x, 'y': y, 'theta': yaw}
+
+
+# ==========================================
+# 2. Flask 앱 (Pose 스트리밍 추가)
 # ==========================================
 def create_flask_app(
     start_event: threading.Event,
     mission_holder: dict,
     robot_ready_events: dict,
     shared_state: dict,
-    active_proxies: list
+    active_proxies: list,
+    shared_pose_state: dict  # 위치 상태 딕셔너리 추가
 ):
-    app = Flask(__name__)
+    app = Flask(__name__, static_folder='static') # static 폴더 명시적 설정
 
     @app.route('/')
     def index():
         html_path = os.path.join(os.path.dirname(__file__), 'dashboard.html')
-        with open(html_path, 'r') as f:
+        with open(html_path, 'r', encoding='utf-8') as f:
             return f.read()
 
     @app.route('/ready_stream')
@@ -124,10 +151,19 @@ def create_flask_app(
             while True:
                 try:
                     entry = mission_holder['mission'].log_queue.get(timeout=1.0)
-                    import json
                     yield f'data: {json.dumps(entry, ensure_ascii=False)}\n\n'
                 except Exception:
                     yield ': keep-alive\n\n'
+        return app.response_class(event_stream(), mimetype='text/event-stream')
+
+    # ── [NEW] 실시간 위치 데이터 스트리밍 라우트 ──
+    @app.route('/pose_stream')
+    def pose_stream():
+        def event_stream():
+            while True:
+                # 0.1초마다 현재 저장된 위치 정보를 JSON으로 웹에 쏨
+                yield f'data: {json.dumps(shared_pose_state)}\n\n'
+                time.sleep(0.1)
         return app.response_class(event_stream(), mimetype='text/event-stream')
 
     @app.route('/start', methods=['POST'])
@@ -151,7 +187,6 @@ def create_flask_app(
     @app.route('/pause', methods=['POST'])
     def pause():
         shared_state['paused'] = True
-        # ── blocking 없이 즉시 반환, cancel은 백그라운드에서 ──
         def do_cancel():
             for proxy in active_proxies:
                 proxy.cancel_current_goal()
@@ -222,26 +257,40 @@ def main(args=None):
         'started':False
     }
     
+    # [NEW] 로봇들의 현재 위치를 저장할 전역 딕셔너리
+    # 빈 상태로 시작 -> amcl_pose가 실제로 들어와야 점이 찍힘 (구동 전엔 표시 안 됨)
+    shared_pose_state = {}
+    
     active_proxies = []
+    pose_trackers = [] # [NEW]
 
     print("==================================================")
-    print(" 🚀 모듈형 다중 로봇 액션 프록시 브릿지 가동 🚀 ")
+    print(" 🚀 모듈형 다중 로봇 액션 프록시 & 관제 브릿지 가동 🚀 ")
     print("==================================================")
 
     for i, target_robot in enumerate(robot_list):
         robot_id = i + 1
+        
+        # 액션 프록시 생성
         proxy = ActionProxy(
             server_node=server['node'], robot_node=target_robot['node'],
             server_action_name=f'robot{robot_id}/navigate_to_pose',
             robot_action_name='navigate_to_pose', robot_id=robot_id, shared_state=shared_state
         )
         active_proxies.append(proxy)
+        
+        # [NEW] 위치 트래커 생성
+        tracker = PoseTracker(
+            robot_node=target_robot['node'], robot_id=robot_id, shared_pose_state=shared_pose_state
+        )
+        pose_trackers.append(tracker)
 
     start_event = threading.Event()
     mission_holder = {'mission': None}
     robot_ready_events = {1: threading.Event(), 2: threading.Event()}
 
-    flask_app = create_flask_app(start_event, mission_holder, robot_ready_events, shared_state, active_proxies)
+    # Flask 앱 생성 시 shared_pose_state 전달
+    flask_app = create_flask_app(start_event, mission_holder, robot_ready_events, shared_state, active_proxies, shared_pose_state)
     flask_thread = threading.Thread(
         target=lambda: flask_app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False),
         daemon=True
@@ -260,7 +309,6 @@ def main(args=None):
     try:
         launch_all(on_robot1_ready=on_robot1_ready, on_robot2_ready=on_robot2_ready)
     except TypeError:
-        # ssh_launcher가 개별 콜백을 지원하지 않을 때의 폴백
         def on_all_ready():
             robot_ready_events[1].set()
             robot_ready_events[2].set()
@@ -304,11 +352,10 @@ def main(args=None):
 
     except KeyboardInterrupt:
         print("\n🛑 프로그램 종료 요청(Ctrl+C) 수신 — 로봇 정지 후 종료합니다.")
-        # ── 미션 루프 즉시 정지 ──
         shared_state['paused'] = True
         for proxy in active_proxies:
             proxy.cancel_current_goal()
-        time.sleep(0.5)  # cancel이 Nav2에 전달될 시간
+        time.sleep(0.5) 
     finally:
         kill_all()
         for system in domain_systems:
