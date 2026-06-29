@@ -2,13 +2,9 @@
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : Main program body for L298N & Relay Sequence Control
-  ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2026 STMicroelectronics.
-  * All rights reserved.
-  *
+  * @brief          : Combined Multi-Task System
+  * : System 1 (Cap Dispenser & Press Sequence via Servos & Dual L298N)
+  * : System 2 (Relay & Actuator Sequence Control)
   ******************************************************************************
   */
 /* USER CODE END Header */
@@ -20,6 +16,7 @@
 /* USER CODE BEGIN Includes */
 #include "mcp2515.h"
 #include <stdio.h>
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -28,23 +25,37 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-/* 센서 감지 매크로 정의 (일반적인 적외선 센서는 감지 시 LOW 출력(NPN형) 기준) */
-#define SENSOR1_DETECTED() (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_1) == GPIO_PIN_RESET)
+/* ========================================================================= */
+/* [시스템 2 매크로 정의]                                                    */
+/* ========================================================================= */
 #define SENSOR2_DETECTED() (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_2) == GPIO_PIN_RESET)
-
-/* 5V 릴레이 제어 편의 기능 (S: PB14) */
 #define RELAY_ON()        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET)
 #define RELAY_OFF()       HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET)
 
-/* 1번 액추에이터 제어 (IN1: PB8, IN2: PB9) */
-#define ACT1_FORWARD()    do { HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_SET);   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_RESET); } while(0)
-#define ACT1_BACKWARD()   do { HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_RESET); HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_SET);   } while(0)
-#define ACT1_STOP()       do { HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_RESET); HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_RESET); } while(0)
+/* 2번 액추에이터 제어 (IN3: PB12, IN4: PB15) - PB13 핀 불량으로 PB15 대체 */
+#define ACT2_FORWARD()    do { HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_SET);   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_15, GPIO_PIN_RESET); } while(0)
+#define ACT2_BACKWARD()   do { HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_RESET); HAL_GPIO_WritePin(GPIOB, GPIO_PIN_15, GPIO_PIN_SET);   } while(0)
+#define ACT2_STOP()       do { HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_RESET); HAL_GPIO_WritePin(GPIOB, GPIO_PIN_15, GPIO_PIN_RESET); } while(0)
 
-/* 2번 액추에이터 제어 (IN3: PB12, IN4: PB13) */
-#define ACT2_FORWARD()    do { HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_SET);   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_13, GPIO_PIN_RESET); } while(0)
-#define ACT2_BACKWARD()   do { HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_RESET); HAL_GPIO_WritePin(GPIOB, GPIO_PIN_13, GPIO_PIN_SET);   } while(0)
-#define ACT2_STOP()       do { HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_RESET); HAL_GPIO_WritePin(GPIOB, GPIO_PIN_13, GPIO_PIN_RESET); } while(0)
+/* ========================================================================= */
+/* [시스템 1: 뚜껑 공급 및 압착 제어 매크로 정의 - PC2 핀 매핑 수정 완료]     */
+/* ========================================================================= */
+/* PB8: 뚜껑 감지 센서 1 */
+#define SENSOR1_CAP_DETECTED() (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_8) == GPIO_PIN_RESET)
+
+/* 뚜껑 공급 액추에이터 제어 (IN1: PC2, IN2: PC3) 👈 PC2로 수정 완료 */
+#define NEW_ACT_FORWARD()  do { HAL_GPIO_WritePin(GPIOC, GPIO_PIN_2, GPIO_PIN_SET);   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_3, GPIO_PIN_RESET); } while(0)
+#define NEW_ACT_BACKWARD() do { HAL_GPIO_WritePin(GPIOC, GPIO_PIN_2, GPIO_PIN_RESET); HAL_GPIO_WritePin(GPIOC, GPIO_PIN_3, GPIO_PIN_SET);   } while(0)
+#define NEW_ACT_STOP()     do { HAL_GPIO_WritePin(GPIOC, GPIO_PIN_2, GPIO_PIN_RESET); HAL_GPIO_WritePin(GPIOC, GPIO_PIN_3, GPIO_PIN_RESET); } while(0)
+
+/* 뚜껑 압착 액추에이터 제어 (IN3: PC0, IN4: PC5) - PC1, PC4 핀 불량으로 PC5 대체 */
+#define PRESS_ACT_FORWARD()  do { HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0, GPIO_PIN_SET);   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_5, GPIO_PIN_RESET); } while(0)
+#define PRESS_ACT_BACKWARD() do { HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0, GPIO_PIN_RESET); HAL_GPIO_WritePin(GPIOC, GPIO_PIN_5, GPIO_PIN_SET);   } while(0)
+#define PRESS_ACT_STOP()     do { HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0, GPIO_PIN_RESET); HAL_GPIO_WritePin(GPIOC, GPIO_PIN_5, GPIO_PIN_RESET); } while(0)
+
+/* 서보모터 펄스 제어 편의 매크로 (TIM3 하드웨어 매핑) */
+#define SET_SERVO1_PULSE(p) __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, (p))
+#define SET_SERVO2_PULSE(p) __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, (p))
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -53,6 +64,8 @@
 
 /* Private variables ---------------------------------------------------------*/
 SPI_HandleTypeDef hspi1;
+
+TIM_HandleTypeDef htim3;
 
 UART_HandleTypeDef huart2;
 
@@ -65,6 +78,9 @@ const osThreadAttr_t defaultTask_attributes = {
 };
 /* USER CODE BEGIN PV */
 MCP2515_HandleTypeDef hmcp2515;
+
+// 시스템 1 제어 상태 플래그
+uint8_t cap_sequence_done = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -72,6 +88,7 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_SPI1_Init(void);
+static void MX_TIM3_Init(void);
 void StartDefaultTask(void *argument);
 
 /* USER CODE BEGIN PFP */
@@ -115,10 +132,26 @@ int main(void)
   MX_GPIO_Init();
   MX_USART2_UART_Init();
   MX_SPI1_Init();
+  MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
   setvbuf(stdout, NULL, _IONBF, 0);
-  printf("\r\n=== Actuator & Relay Sequence System Start ===\r\n");
+  printf("\r\n=== System Main Boot Up Completed (Newlib Reentrant Enabled) ===\r\n");
 
+  // 서보모터용 PWM 하드웨어 드라이버 구동 시작
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);
+
+  // 시스템 1 하드웨어 대기 홈(Home) 위치 빌드 및 정지 상태 고정 (원복 완료)
+  SET_SERVO1_PULSE(2300);
+  SET_SERVO2_PULSE(2300);
+  NEW_ACT_STOP();
+  PRESS_ACT_STOP();
+
+  // 시스템 2 초기 하드웨어 상태 빌드
+  RELAY_ON();
+  ACT2_STOP();
+
+  // MCP2515 CAN 컨트롤러 인터페이스 구성
   hmcp2515.hspi    = &hspi1;
   hmcp2515.cs_port = MCP2515_CS_GPIO_Port;
   hmcp2515.cs_pin  = MCP2515_CS_Pin;
@@ -126,19 +159,14 @@ int main(void)
 
   if (MCP2515_AutoDetectOsc(&hmcp2515) != HAL_OK)
   {
-    printf("[CAN] MCP2515 init failed\r\n");
+    printf("[CAN] MCP2515 initialization failed!\r\n");
     MCP2515_PrintDiag(&hmcp2515);
   }
   else
   {
     MCP2515_SetNormalMode(&hmcp2515);
-    printf("[CAN] MCP2515 ready (%lu MHz)\r\n",
-           (unsigned long)(hmcp2515.osc_hz / 1000000U));
+    printf("[CAN] MCP2515 is ready on SPI1 (%lu MHz)\r\n", (unsigned long)(hmcp2515.osc_hz / 1000000U));
   }
-
-  RELAY_ON();
-  ACT1_STOP();
-  ACT2_STOP();
   /* USER CODE END 2 */
 
   /* Init scheduler */
@@ -278,6 +306,69 @@ static void MX_SPI1_Init(void)
 }
 
 /**
+  * @brief TIM3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM3_Init(void)
+{
+
+  /* USER CODE BEGIN TIM3_Init 0 */
+
+  /* USER CODE END TIM3_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+
+  /* USER CODE BEGIN TIM3_Init 1 */
+
+  /* USER CODE END TIM3_Init 1 */
+  htim3.Instance = TIM3;
+  htim3.Init.Prescaler = 83;
+  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim3.Init.Period = 19999;
+  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim3, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_Init(&htim3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 0;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM3_Init 2 */
+
+  /* USER CODE END TIM3_Init 2 */
+  HAL_TIM_MspPostInit(&htim3);
+
+}
+
+/**
   * @brief USART2 Initialization Function
   * @param None
   * @retval None
@@ -329,17 +420,26 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0|GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_5, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_8
-                          |GPIO_PIN_9, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15, GPIO_PIN_RESET);
 
   /*Configure GPIO pin : B1_Pin */
   GPIO_InitStruct.Pin = B1_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : PC0 PC2 PC3 PC5 */
+  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_5;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
   /*Configure GPIO pin : PA4 */
   GPIO_InitStruct.Pin = GPIO_PIN_4;
@@ -354,24 +454,21 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PB12 PB13 PB14 PB8
-                           PB9 */
-  GPIO_InitStruct.Pin = GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_8
-                          |GPIO_PIN_9;
+  /*Configure GPIO pins : PB12 PB13 PB14 PB15 */
+  GPIO_InitStruct.Pin = GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  /* USER CODE BEGIN MX_GPIO_Init_2 */
-  /* CS must be HIGH (inactive) before first SPI transaction */
-  HAL_GPIO_WritePin(MCP2515_CS_GPIO_Port, MCP2515_CS_Pin, GPIO_PIN_SET);
-
-  /* Re-apply PULLUP for INT (PB0) and SENSOR1 (PB1) */
-  GPIO_InitStruct.Pin  = MCP2515_INT_Pin | SENSOR_Pin;
+  /*Configure GPIO pin : PB8 */
+  GPIO_InitStruct.Pin = GPIO_PIN_8;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /* USER CODE BEGIN MX_GPIO_Init_2 */
+
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
@@ -386,7 +483,6 @@ static void CANPingTask(void *argument)
   {
     uint32_t now = osKernelGetTickCount();
 
-    /* Send a ping frame every 1s */
     if ((now - last_tx) >= 1000U)
     {
       last_tx = now;
@@ -399,21 +495,14 @@ static void CANPingTask(void *argument)
         .extended = false,
       };
       HAL_StatusTypeDef s = MCP2515_Send(&hmcp2515, &tx);
-      printf("[TX] ID=0x003 data=[03 %02X] %s\r\n",
-             tx_counter, s == HAL_OK ? "OK" : "FAIL");
       if (s != HAL_OK)
         MCP2515_PrintDiag(&hmcp2515);
     }
 
-    /* Poll for incoming frames */
     MCP2515_CanMsg rx = {0};
     if (MCP2515_Receive(&hmcp2515, &rx, 5U) == HAL_OK)
     {
-      printf("[RX] ID=0x%03lX dlc=%u data=[",
-             (unsigned long)rx.id, rx.dlc);
-      for (uint8_t i = 0U; i < rx.dlc; i++)
-        printf("%02X%s", rx.data[i], i < rx.dlc - 1U ? " " : "");
-      printf("]\r\n");
+      printf("[RX CAN] ID=0x%03lX dlc=%u\r\n", (unsigned long)rx.id, rx.dlc);
     }
 
     osDelay(50U);
@@ -422,64 +511,124 @@ static void CANPingTask(void *argument)
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN Header_StartDefaultTask */
-/**
-  * @brief  Function implementing the defaultTask thread.
-  * @param  argument: Not used
-  * @retval None
-  */
-/* USER CODE END Header_StartDefaultTask */
 void StartDefaultTask(void *argument)
 {
-  /* USER CODE BEGIN 5 */
   (void)argument;
+  static GPIO_PinState prev_sensor1_state = GPIO_PIN_SET;
 
   for (;;)
   {
-    /* Sensor 1 감지 시: 액추에이터 1 시퀀스 */
-    if (SENSOR1_DETECTED())
+    /* ========================================================================= */
+    /* [시스템 1] 뚜껑 공급 + 신규 압착 메커니즘 통합 제어 시퀀스                */
+    /* ========================================================================= */
+    if (SENSOR1_CAP_DETECTED())
     {
-      printf("[SEQ] Sensor 1 Active! -> Relay OFF, Actuator 1 Moving.\r\n");
+      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);
 
-      RELAY_OFF();
-      osDelay(50);
-
-      ACT1_FORWARD();
-      osDelay(2000);
-
-      ACT1_BACKWARD();
-      osDelay(5000);
-
-      ACT1_STOP();
-      osDelay(50);
-
-      RELAY_ON();
-      printf("[SEQ] Actuator 1 Completed! -> Relay ON for 0.5s.\r\n");
-      osDelay(500);
-
-      while (SENSOR1_DETECTED())
+      if (cap_sequence_done == 0)
       {
-        osDelay(100);
+        // 중복 방지를 위해 진입하자마자 플래그 잠금
+        cap_sequence_done = 1;
+        printf("[SYS 1] Triggered -> Starting Full Cap & Press Sequence\r\n");
+
+        RELAY_OFF();
+
+        // STEP 1. 서보모터 1번 구동 (대기 2300 -> 역회전 하강 상태 800)
+        SET_SERVO1_PULSE(800);
+        osDelay(2000);
+
+        // STEP 2. 서보모터 1번 미세 보정 위치 복귀 (원복 완료)
+        SET_SERVO1_PULSE(2300);
+        osDelay(2000);
+
+        // STEP 3. 뚜껑 공급용 기계식 액추되이터 전진 (9초)
+        NEW_ACT_FORWARD();
+        osDelay(9000);
+
+        NEW_ACT_STOP();
+        osDelay(300);
+
+        // STEP 4. 뚜껑 공급용 기계식 액추에이터 후진 복귀 (9.5초)
+        NEW_ACT_BACKWARD();
+        osDelay(9500);
+
+        NEW_ACT_STOP();
+        osDelay(500);
+
+        // STEP 5. 신규 압착 액추에이터 전진 구동 (위에서 꾹 누르기 - 9초)
+        printf("[SYS 1] Pressing Mechanism Active...\r\n");
+        PRESS_ACT_FORWARD();
+        osDelay(9000);
+
+        PRESS_ACT_STOP();
+        osDelay(300);
+
+        // STEP 6. 신규 압착 액추에이터 복귀 후진 구동 (9초)
+        PRESS_ACT_BACKWARD();
+        osDelay(9000);
+
+        PRESS_ACT_STOP();
+        osDelay(200);
+        printf("[SYS 1] Pressing Mechanism Completed.\r\n");
+
+        // STEP 7. 서보모터 2번 꺾기 구동 (대기 1000 -> 회전 1500)
+        SET_SERVO2_PULSE(1000);
+        osDelay(2000);
+
+        // STEP 8. 전체 서보축 최종 안전 대기 홈(Home) 위치 초기화 복귀 (원복 완료)
+        SET_SERVO1_PULSE(2300);
+        osDelay(2000);
+        SET_SERVO2_PULSE(2300);
+        osDelay(1000);
+
+        RELAY_ON();
+        printf("[SYS 1] Sequence Completed Successfully.\r\n");
       }
+
+      // 시스템 2가 스케줄링될 수 있도록 대기 처리
+      osDelay(50);
     }
-    /* Sensor 2 감지 시: 액추에이터 2 시퀀스 */
-    else if (SENSOR2_DETECTED())
+    else
     {
-      printf("[SEQ] Sensor 2 Active! -> Relay OFF, Actuator 2 Moving.\r\n");
+      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
+
+      if (prev_sensor1_state != GPIO_PIN_SET)
+      {
+        SET_SERVO1_PULSE(2300);
+        SET_SERVO2_PULSE(2300);
+        NEW_ACT_STOP();
+        PRESS_ACT_STOP();
+        printf("[SYS 1] Sensor Cleared -> System Standby\r\n");
+      }
+      cap_sequence_done = 0;
+    }
+    prev_sensor1_state = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_8);
+
+
+    /* ========================================================================= */
+    /* [기존 유지] 시츄에이션 2: 기존 액추에이터 2번 및 릴레이 제어              */
+    /* ========================================================================= */
+    if (SENSOR2_DETECTED())
+    {
+      printf("[SEQ 2] Sensor 2 Active! -> Relay OFF, Actuator 2 Moving.\r\n");
 
       RELAY_OFF();
       osDelay(50);
 
       ACT2_FORWARD();
-      osDelay(8000);
+      osDelay(10000);
+
+      ACT2_STOP();
+      osDelay(300);
 
       ACT2_BACKWARD();
-      osDelay(11000);
+      osDelay(13000);
 
       ACT2_STOP();
       osDelay(50);
 
       RELAY_ON();
-      printf("[SEQ] Actuator 2 Completed! -> Relay ON for 0.5s.\r\n");
+      printf("[SEQ 2] Actuator 2 Completed! -> Relay ON.\r\n");
       osDelay(500);
 
       while (SENSOR2_DETECTED())
@@ -490,8 +639,9 @@ void StartDefaultTask(void *argument)
 
     osDelay(20);
   }
-  /* USER CODE END 5 */
 }
+/* USER CODE END Header_StartDefaultTask */
+
 
 /**
   * @brief  Period elapsed callback in non blocking mode
