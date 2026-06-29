@@ -53,12 +53,17 @@ typedef struct
 #define BELT_STATE_RUNNING    1U
 
 #define UART_CMD_START        'S'
-#define UART_RSP_OK           'O'
-#define UART_RSP_NG           'N'
-#define UART_PI_DELAY_MS      500U
+#define UART_RSP_RED          'R'   /* 빨간 약통 (OK) */
+#define UART_RSP_BLUE         'B'   /* 파란 약통 (OK) */
+#define UART_RSP_NG           'N'   /* 불량 (NG) */
 #define UART_RX_TIMEOUT_MS    1000U
 #define PI_RSP_LOG_SIZE       16U
-#define SENSOR_REARM_DELAY_MS 800U
+#define SENSOR_REARM_DELAY_MS 500U
+
+/* 2번 보드 → 1번 보드 CAN 벨트 제어 프로토콜 */
+#define CAN_ID_2ND_TX        0x102U
+#define CAN_CMD_BELT_STOP    0x10U  /* 벨트 정지 요청 */
+#define CAN_CMD_BELT_RESUME  0x11U  /* 벨트 재개 요청 */
 /* USER CODE END EC */
 
 /* Exported macro ------------------------------------------------------------*/
@@ -70,8 +75,11 @@ typedef struct
 void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
-extern BeltStatus  g_belt_status;
-extern osMutexId_t beltMutex;
+extern BeltStatus      g_belt_status;
+extern osMutexId_t     beltMutex;
+extern osMutexId_t     canMutex;
+extern osSemaphoreId_t sem_can_int;
+extern volatile bool   g_belt_ext_stop;
 bool ReadSensor(void);
 /* USER CODE END EFP */
 

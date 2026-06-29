@@ -35,7 +35,8 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+#define CAN_ID_1ST_TX     0x101U
+#define CAN_MSG_CONTAINER 0x01U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -62,6 +63,10 @@ BeltStatus g_belt_status;
 
 osMutexId_t beltMutex;
 osMutexId_t piRspMutex;
+osMutexId_t canMutex;         /* MCP2515 SPI 동시 접근 방지 */
+osSemaphoreId_t sem_can_int;  /* MCP2515 INT 핀 낙하 → CanRxTask 즉시 기상 */
+
+volatile bool g_belt_ext_stop = false;  /* 2번 보드 벨트 정지 요청 플래그 */
 
 static volatile bool g_sensor_monitoring = false;
 static volatile bool g_sensor_triggered  = false;
@@ -80,6 +85,7 @@ void StartDefaultTask(void *argument);
 /* USER CODE BEGIN PFP */
 static void BeltTask(void *argument);
 static void DisplayTask(void *argument);
+static void CanRxTask(void *argument);
 static void SensorMonitoring_Enable(void);
 static void SensorMonitoring_Disable(void);
 static bool Sensor_ConfirmDetected(void);
@@ -128,10 +134,17 @@ static bool Sensor_ConfirmDetected(void)
   return ReadSensor();
 }
 
-/* EXTI callback: fires on falling edge of SENSOR_Pin (PB1).
-   Immediately cuts relay power and flags the detection for the task. */
+/* EXTI callback:
+   GPIO_PIN_0 (PB0) — MCP2515 INT: 메시지 수신 즉시 CanRxTask 기상
+   GPIO_PIN_1 (PB1) — 컨베이어 센서: 릴레이 즉시 차단 후 BeltTask에 플래그 전달 */
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
+  if (GPIO_Pin == MCP2515_INT_Pin)
+  {
+    osSemaphoreRelease(sem_can_int);
+    return;
+  }
+
   if (GPIO_Pin != SENSOR_Pin || !g_sensor_monitoring)
     return;
   if (HAL_GPIO_ReadPin(SENSOR_GPIO_Port, SENSOR_Pin) != GPIO_PIN_RESET)
@@ -173,11 +186,13 @@ static void HandleObstacleDetected(void)
   uint8_t rx_byte = UART_RSP_NG;
 
   HAL_StatusTypeDef rx_status;
+  osDelay(500U);  /* 벨트 정지 후 카메라 안정화 대기 */
   PiUart_FlushRx();
   HAL_UART_Transmit(&huart2, &tx_byte, 1U, HAL_MAX_DELAY);
   rx_status = HAL_UART_Receive(&huart2, &rx_byte, 1U, UART_RX_TIMEOUT_MS);
 
-  if (rx_status != HAL_OK)
+  if (rx_status != HAL_OK ||
+      (rx_byte != UART_RSP_RED && rx_byte != UART_RSP_BLUE && rx_byte != UART_RSP_NG))
     rx_byte = UART_RSP_NG;
 
   osMutexAcquire(piRspMutex, osWaitForever);
@@ -185,7 +200,19 @@ static void HandleObstacleDetected(void)
   g_pi_rsp_count++;
   osMutexRelease(piRspMutex);
 
-  osDelay(UART_PI_DELAY_MS);
+  /* 비전 검사 결과(색상 바이트)를 CAN으로 브로드캐스트 */
+  static uint8_t s_can_seq = 0U;
+  s_can_seq++;
+
+  MCP2515_CanMsg can_tx = {
+    .id       = CAN_ID_1ST_TX,
+    .dlc      = 3U,
+    .data     = {CAN_MSG_CONTAINER, s_can_seq, rx_byte},
+    .extended = false,
+  };
+  osMutexAcquire(canMutex, osWaitForever);
+  MCP2515_Send(&hmcp2515, &can_tx);
+  osMutexRelease(canMutex);
 }
 
 /* Belt state machine.
@@ -279,8 +306,9 @@ static void BeltTask(void *argument)
         break;
 
       case MACHINE_STAGE_RUNNING:
-        /* sensor_active = false while HandleObstacleDetected is executing */
-        belt_on = sensor_active;
+        /* sensor_active = false while HandleObstacleDetected is executing.
+           g_belt_ext_stop = true when 2nd board requests belt pause for dispensing. */
+        belt_on = sensor_active && !g_belt_ext_stop;
         HAL_GPIO_WritePin(RELAY_GPIO_Port,    RELAY_Pin,    belt_on ? GPIO_PIN_SET : GPIO_PIN_RESET);
         HAL_GPIO_WritePin(ACT1_IN1_GPIO_Port, ACT1_IN1_Pin, GPIO_PIN_RESET);
         HAL_GPIO_WritePin(ACT1_IN2_GPIO_Port, ACT1_IN2_Pin, GPIO_PIN_SET);
@@ -339,22 +367,24 @@ int main(void)
   setvbuf(stdout, NULL, _IONBF, 0);
   HAL_Delay(500U);
 
+  /* ── 1단계: UART 동작 확인 ── */
+  printf("\r\n=== 1st Board Start ===\r\n");
+
+  /* ── 2단계: MCP2515 SPI 초기화 확인 ── */
   hmcp2515.hspi    = &hspi1;
   hmcp2515.cs_port = MCP2515_CS_GPIO_Port;
   hmcp2515.cs_pin  = MCP2515_CS_Pin;
   hmcp2515.osc_hz  = MCP2515_OSC_8MHZ;
 
-  printf("\r\n=== 1st Board CAN Ping Test ===\r\n");
   if (MCP2515_AutoDetectOsc(&hmcp2515) != HAL_OK)
   {
-    printf("[CAN] MCP2515 init FAILED\r\n");
+    printf("[CAN] MCP2515 init FAILED — SPI 배선/CS 핀 확인\r\n");
     MCP2515_PrintDiag(&hmcp2515);
   }
   else
   {
     MCP2515_SetNormalMode(&hmcp2515);
-    printf("[CAN] MCP2515 ready (%lu MHz) -> TX ID=0x001\r\n",
-           (unsigned long)(hmcp2515.osc_hz / 1000000U));
+    printf("[CAN] MCP2515 ready (8 MHz)\r\n");
   }
   /* USER CODE END 2 */
 
@@ -364,12 +394,19 @@ int main(void)
   /* USER CODE BEGIN RTOS_MUTEX */
   beltMutex  = osMutexNew(NULL);
   piRspMutex = osMutexNew(NULL);
-  if (beltMutex == NULL || piRspMutex == NULL)
+  canMutex   = osMutexNew(NULL);
+  if (beltMutex == NULL || piRspMutex == NULL || canMutex == NULL)
     Error_Handler();
   /* USER CODE END RTOS_MUTEX */
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
-  /* add semaphores, ... */
+  sem_can_int = osSemaphoreNew(2U, 0U, NULL);  /* 최대 2 (MCP2515 RX 버퍼 수) */
+  if (sem_can_int == NULL) Error_Handler();
+
+  /* 세마포어 생성 후 NVIC 활성화 — ISR에서 NULL 접근 방지 */
+  __HAL_GPIO_EXTI_CLEAR_IT(MCP2515_INT_Pin);
+  HAL_NVIC_SetPriority(EXTI0_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(EXTI0_IRQn);
   /* USER CODE END RTOS_SEMAPHORES */
 
   /* USER CODE BEGIN RTOS_TIMERS */
@@ -395,8 +432,14 @@ int main(void)
     .stack_size = 512U * 4U,
     .priority   = osPriorityBelowNormal,
   };
+  static const osThreadAttr_t can_rx_attr = {
+    .name       = "CanRxTask",
+    .stack_size = 256U * 4U,
+    .priority   = osPriorityNormal,
+  };
   if (osThreadNew(BeltTask,    NULL, &belt_attr)    == NULL ||
-      osThreadNew(DisplayTask, NULL, &display_attr) == NULL)
+      osThreadNew(DisplayTask, NULL, &display_attr) == NULL ||
+      osThreadNew(CanRxTask,   NULL, &can_rx_attr)  == NULL)
     Error_Handler();
   /* USER CODE END RTOS_THREADS */
 
@@ -574,14 +617,8 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : PB0 */
-  GPIO_InitStruct.Pin = GPIO_PIN_0;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : PB1 */
-  GPIO_InitStruct.Pin = GPIO_PIN_1;
+  /*Configure GPIO pins : PB0 PB1 */
+  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
@@ -610,16 +647,62 @@ static void MX_GPIO_Init(void)
   /* CS must be HIGH (inactive) before first SPI transaction */
   HAL_GPIO_WritePin(MCP2515_CS_GPIO_Port, MCP2515_CS_Pin, GPIO_PIN_SET);
 
-  /* Re-apply PULLUP for INT (PB0) */
-  GPIO_InitStruct.Pin  = MCP2515_INT_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_PULLUP;
-  HAL_GPIO_Init(MCP2515_INT_GPIO_Port, &GPIO_InitStruct);
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
+/* MCP2515 INT 핀 FALLING 엣지(sem_can_int)로 즉시 깨어나
+   2번 보드의 CAN 벨트 제어 명령(STOP/RESUME)을 처리한다.
+   MCP2515 RX 버퍼(RXB0, RXB1)가 2개이므로 세마포어 최대 카운트를 2로 설정한다. */
+static void CanRxTask(void *argument)
+{
+  (void)argument;
+  MCP2515_CanMsg rx;
+  uint32_t diag_tick = 0U;
 
+  printf("[CAN] CanRxTask started — waiting for INT\r\n");
+
+  for (;;)
+  {
+    /* ── 10초마다 MCP2515 레지스터 덤프 (CAN 버스 배선 진단) ── */
+    uint32_t now = osKernelGetTickCount();
+    if (now - diag_tick >= 10000U)
+    {
+      diag_tick = now;
+      osMutexAcquire(canMutex, osWaitForever);
+      printf("[CAN-DIAG] periodic ---\r\n");
+      MCP2515_PrintDiag(&hmcp2515);
+      osMutexRelease(canMutex);
+    }
+
+    /* INT 세마포어 대기 (최대 100ms).
+       타임아웃 후에도 폴링으로 버퍼를 확인하여 INT 핀 미동작 시 폴백 처리. */
+    osSemaphoreAcquire(sem_can_int, 100U);
+
+    osMutexAcquire(canMutex, osWaitForever);
+    HAL_StatusTypeDef st = MCP2515_Receive(&hmcp2515, &rx, 1U);
+    osMutexRelease(canMutex);
+
+    if (st == HAL_OK && rx.id == CAN_ID_2ND_TX && rx.dlc >= 1U)
+    {
+      if (rx.data[0] == CAN_CMD_BELT_STOP)
+      {
+        g_belt_ext_stop = true;
+        printf("[CAN] BELT_STOP received\r\n");
+      }
+      else if (rx.data[0] == CAN_CMD_BELT_RESUME)
+      {
+        g_belt_ext_stop = false;
+        printf("[CAN] BELT_RESUME received\r\n");
+      }
+      else
+      {
+        printf("[CAN] Unknown cmd id=0x%03lX data=0x%02X\r\n",
+               (unsigned long)rx.id, rx.data[0]);
+      }
+    }
+  }
+}
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN Header_StartDefaultTask */
@@ -633,44 +716,10 @@ void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN 5 */
   (void)argument;
-  uint8_t  tx_counter = 0U;
-  uint32_t last_tx    = 0U;
-
+  /* BeltTask가 실제 공정을 담당. 이 태스크는 유휴 상태. */
   for (;;)
   {
-    uint32_t now = osKernelGetTickCount();
-
-    /* Send a ping frame every 1s */
-    if ((now - last_tx) >= 1000U)
-    {
-      last_tx = now;
-      tx_counter++;
-
-      MCP2515_CanMsg tx = {
-        .id       = 0x001U,
-        .dlc      = 2U,
-        .data     = {0x01U, tx_counter},
-        .extended = false,
-      };
-      HAL_StatusTypeDef s = MCP2515_Send(&hmcp2515, &tx);
-      printf("[TX] ID=0x001 data=[01 %02X] %s\r\n",
-             tx_counter, s == HAL_OK ? "OK" : "FAIL");
-      if (s != HAL_OK)
-        MCP2515_PrintDiag(&hmcp2515);
-    }
-
-    /* Poll for incoming frames */
-    MCP2515_CanMsg rx = {0};
-    if (MCP2515_Receive(&hmcp2515, &rx, 5U) == HAL_OK)
-    {
-      printf("[RX] ID=0x%03lX dlc=%u data=[",
-             (unsigned long)rx.id, rx.dlc);
-      for (uint8_t i = 0U; i < rx.dlc; i++)
-        printf("%02X%s", rx.data[i], i < rx.dlc - 1U ? " " : "");
-      printf("]\r\n");
-    }
-
-    osDelay(50U);
+    osDelay(osWaitForever);
   }
   /* USER CODE END 5 */
 }
