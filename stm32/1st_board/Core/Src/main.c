@@ -37,6 +37,10 @@
 /* USER CODE BEGIN PD */
 #define CAN_ID_1ST_TX     0x101U
 #define CAN_MSG_CONTAINER 0x01U
+
+/* 신규 추가: PA3 시작 적외선 센서 정의 */
+#define START_SENSOR_GPIO_Port GPIOA
+#define START_SENSOR_Pin       GPIO_PIN_3
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -92,6 +96,9 @@ static bool Sensor_ConfirmDetected(void);
 static void BeltStatus_Update(uint8_t stage, bool belt_on);
 static void PiUart_FlushRx(void);
 static void HandleObstacleDetected(void);
+
+/* 신규 추가: 시작 센서 상태 읽기 함수 프로토타입 */
+static bool ReadStartSensor(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -102,9 +109,16 @@ int __io_putchar(int ch)
   return ch;
 }
 
+/* 기존 센서 검출 확인 (비전 검사 트리거용) */
 bool ReadSensor(void)
 {
   return (HAL_GPIO_ReadPin(SENSOR_GPIO_Port, SENSOR_Pin) == GPIO_PIN_RESET);
+}
+
+/* 신규 추가: PA5 시작 센서 상태 읽기 (물체 감지 시 true 반환) */
+static bool ReadStartSensor(void)
+{
+  return (HAL_GPIO_ReadPin(START_SENSOR_GPIO_Port, START_SENSOR_Pin) == GPIO_PIN_RESET);
 }
 
 /* Arm EXTI interrupt for sensor detection. */
@@ -177,9 +191,7 @@ static void PiUart_FlushRx(void)
   while (HAL_UART_Receive(&huart2, &dummy, 1U, 1U) == HAL_OK) {}
 }
 
-/* Send 'S' to Raspberry Pi immediately, receive one-byte inference result.
-   Timeout is treated as 'N'. After response is stored, waits UART_PI_DELAY_MS
-   before returning so the caller can resume the belt. */
+/* Send 'S' to Raspberry Pi immediately, receive one-byte inference result. */
 static void HandleObstacleDetected(void)
 {
   uint8_t tx_byte = UART_CMD_START;
@@ -216,10 +228,9 @@ static void HandleObstacleDetected(void)
 }
 
 /* Belt state machine.
-   IDLE    : waits for button press, then starts actuator1 forward.
+   IDLE    : PA5 적외선 감지 센서 확인 -> 감지 시 1초 대기 -> FORWARD 전이
    FORWARD : holds actuator1 forward for 8s, then transitions to RUNNING.
-   RUNNING : actuator1 backward, belt ON, sensor monitoring active.
-             On obstacle: belt OFF -> Pi UART exchange -> belt ON (loops). */
+   RUNNING : actuator1 backward, belt ON, sensor monitoring active. */
 static void BeltTask(void *argument)
 {
   (void)argument;
@@ -238,15 +249,23 @@ static void BeltTask(void *argument)
     {
       case MACHINE_STAGE_IDLE:
         SensorMonitoring_Disable();
-        if (HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin) == GPIO_PIN_RESET)
-        {
-          while (HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin) == GPIO_PIN_RESET)
-            osDelay(10U);
-          osDelay(50U);
 
-          current_stage    = MACHINE_STAGE_FORWARD;
-          stage_start_tick = osKernelGetTickCount();
-          sensor_active    = false;
+        /* 1. 신규 PA5 적외선 센서 감지 상태 확인 */
+        if (ReadStartSensor() == true)
+        {
+          /* 채터링 노이즈 방지를 위해 20ms 후 재확인 */
+          osDelay(20U);
+          if (ReadStartSensor() == true)
+          {
+            /* 2. 감지 후 1초(1000ms) 지연 대기 */
+            osDelay(1000U);
+
+            /* 3. 공정 구동(FORWARD 단계)으로 전이 */
+            current_stage    = MACHINE_STAGE_FORWARD;
+            stage_start_tick = osKernelGetTickCount();
+            sensor_active    = false;
+            printf("[SYSTEM] Start Sensor Triggered! 1s delayed. Starting FORWARD stage.\r\n");
+          }
         }
         break;
 
@@ -306,8 +325,6 @@ static void BeltTask(void *argument)
         break;
 
       case MACHINE_STAGE_RUNNING:
-        /* sensor_active = false while HandleObstacleDetected is executing.
-           g_belt_ext_stop = true when 2nd board requests belt pause for dispensing. */
         belt_on = sensor_active && !g_belt_ext_stop;
         HAL_GPIO_WritePin(RELAY_GPIO_Port,    RELAY_Pin,    belt_on ? GPIO_PIN_SET : GPIO_PIN_RESET);
         HAL_GPIO_WritePin(ACT1_IN1_GPIO_Port, ACT1_IN1_Pin, GPIO_PIN_RESET);
@@ -319,7 +336,9 @@ static void BeltTask(void *argument)
     }
 
     BeltStatus_Update(current_stage, belt_on);
-    osDelay(current_stage == MACHINE_STAGE_RUNNING ? 1U : 50U);
+
+    /* 기존 1U에서 10U로 변경하여 CPU 과점유 방지 (성능 최적화 적용) */
+    osDelay(current_stage == MACHINE_STAGE_RUNNING ? 10U : 50U);
   }
 }
 
@@ -604,26 +623,32 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10|GPIO_PIN_8|GPIO_PIN_9, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin : PC13 */
+  /*Configure GPIO pin : PC13 (B1 버튼은 더이상 사용하지 않으나 하드웨어 초기화 유지) */
   GPIO_InitStruct.Pin = GPIO_PIN_13;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : PA4 */
+  /*Configure GPIO pin : PA4 (MCP2515 CS) */
   GPIO_InitStruct.Pin = GPIO_PIN_4;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PB0 PB1 */
+  /* ── 변경 구역: PA5 핀을 시작 센서(입력)로 지정 ── */
+  GPIO_InitStruct.Pin = START_SENSOR_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;     /* 노이즈 유입 방지를 위해 내부 풀업 설정 */
+  HAL_GPIO_Init(START_SENSOR_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : PB0 PB1 (기존 인터럽트 핀들) */
   GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PB10 PB8 PB9 */
+  /*Configure GPIO pins : PB10 PB8 PB9 (액추에이터 제어 등) */
   GPIO_InitStruct.Pin = GPIO_PIN_10|GPIO_PIN_8|GPIO_PIN_9;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
@@ -635,25 +660,15 @@ static void MX_GPIO_Init(void)
   HAL_NVIC_EnableIRQ(EXTI1_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
-  /* CubeMX configures PC13 as EXTI; reconfigure as plain input for polling */
-  GPIO_InitStruct.Pin  = B1_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
-
   /* Set actuator1 default position (backward) */
   HAL_GPIO_WritePin(ACT1_IN2_GPIO_Port, ACT1_IN2_Pin, GPIO_PIN_SET);
 
   /* CS must be HIGH (inactive) before first SPI transaction */
   HAL_GPIO_WritePin(MCP2515_CS_GPIO_Port, MCP2515_CS_Pin, GPIO_PIN_SET);
-
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
-/* MCP2515 INT 핀 FALLING 엣지(sem_can_int)로 즉시 깨어나
-   2번 보드의 CAN 벨트 제어 명령(STOP/RESUME)을 처리한다.
-   MCP2515 RX 버퍼(RXB0, RXB1)가 2개이므로 세마포어 최대 카운트를 2로 설정한다. */
 static void CanRxTask(void *argument)
 {
   (void)argument;
@@ -664,7 +679,6 @@ static void CanRxTask(void *argument)
 
   for (;;)
   {
-    /* ── 10초마다 MCP2515 레지스터 덤프 (CAN 버스 배선 진단) ── */
     uint32_t now = osKernelGetTickCount();
     if (now - diag_tick >= 10000U)
     {
@@ -675,8 +689,6 @@ static void CanRxTask(void *argument)
       osMutexRelease(canMutex);
     }
 
-    /* INT 세마포어 대기 (최대 100ms).
-       타임아웃 후에도 폴링으로 버퍼를 확인하여 INT 핀 미동작 시 폴백 처리. */
     osSemaphoreAcquire(sem_can_int, 100U);
 
     osMutexAcquire(canMutex, osWaitForever);
@@ -706,17 +718,10 @@ static void CanRxTask(void *argument)
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN Header_StartDefaultTask */
-/**
-  * @brief  Function implementing the defaultTask thread.
-  * @param  argument: Not used
-  * @retval None
-  */
-/* USER CODE END Header_StartDefaultTask */
 void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN 5 */
   (void)argument;
-  /* BeltTask가 실제 공정을 담당. 이 태스크는 유휴 상태. */
   for (;;)
   {
     osDelay(osWaitForever);
@@ -724,55 +729,18 @@ void StartDefaultTask(void *argument)
   /* USER CODE END 5 */
 }
 
-/**
-  * @brief  Period elapsed callback in non blocking mode
-  * @note   This function is called  when TIM11 interrupt took place, inside
-  * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
-  * a global variable "uwTick" used as application time base.
-  * @param  htim : TIM handle
-  * @retval None
-  */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
-  /* USER CODE BEGIN Callback 0 */
-
-  /* USER CODE END Callback 0 */
   if (htim->Instance == TIM11)
   {
     HAL_IncTick();
   }
-  /* USER CODE BEGIN Callback 1 */
-
-  /* USER CODE END Callback 1 */
 }
 
-/**
-  * @brief  This function is executed in case of error occurrence.
-  * @retval None
-  */
 void Error_Handler(void)
 {
-  /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
   while (1)
   {
   }
-  /* USER CODE END Error_Handler_Debug */
 }
-#ifdef USE_FULL_ASSERT
-/**
-  * @brief  Reports the name of the source file and the source line number
-  *         where the assert_param error has occurred.
-  * @param  file: pointer to the source file name
-  * @param  line: assert_param error line source number
-  * @retval None
-  */
-void assert_failed(uint8_t *file, uint32_t line)
-{
-  /* USER CODE BEGIN 6 */
-  /* User can add his own implementation to report the file name and line number,
-     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
-  /* USER CODE END 6 */
-}
-#endif /* USE_FULL_ASSERT */
