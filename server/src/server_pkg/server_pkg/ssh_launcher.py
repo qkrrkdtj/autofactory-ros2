@@ -29,21 +29,19 @@ DEVICES = [
 ]
 
 sessions = []
-_on_all_ready = None
 
-def wait_for_topic(topic):
-    """토픽이 뜰 때까지 무한 대기"""
+def wait_for_topic_by_domain(topic, domain_id):
+    """특정 도메인의 토픽이 뜰 때까지 무한 대기"""
     while True:
-        for domain_id in [31, 32]:
-            env = os.environ.copy()
-            env['ROS_DOMAIN_ID'] = str(domain_id)
-            result = subprocess.run(
-                ["ros2", "topic", "list"],
-                capture_output=True, text=True,
-                env=env
-            )
-            if topic in result.stdout:
-                return True
+        env = os.environ.copy()
+        env['ROS_DOMAIN_ID'] = str(domain_id)
+        result = subprocess.run(
+            ["ros2", "topic", "list"],
+            capture_output=True, text=True,
+            env=env
+        )
+        if topic in result.stdout:
+            return True
         time.sleep(1)
 
 def ssh_run(device):
@@ -64,48 +62,54 @@ def ssh_run(device):
     except Exception as e:
         print(f"[{device['name']}] SSH 접속 실패 - 기기가 꺼져있거나 네트워크 연결 안됨 ({device['host']})")
         
-def launch_all(on_all_ready=None):
-    global _on_all_ready
-    _on_all_ready = on_all_ready
-
+def launch_all(on_robot1_ready=None, on_robot2_ready=None):
+    """각 로봇의 콜백을 개별적으로 받아 처리합니다."""
     for device in DEVICES:
         t = threading.Thread(target=ssh_run, args=(device,), daemon=True)
         t.start()
         
-    def wait_and_notify():
-        print("⏳ /keepout_filter_mask 토픽 대기 중...")
-        wait_for_topic('/keepout_filter_mask')
-        print("✅ keepout_filter 확인 — 모든 준비 완료!")
-        if _on_all_ready:
-            _on_all_ready()
+    def wait_and_notify_1():
+        print("⏳ [Waffle 1] /keepout_filter_mask 대기 중 (Domain 31)...")
+        wait_for_topic_by_domain('/keepout_filter_mask', 31)
+        print("✅ [Waffle 1] keepout_filter 확인 완료!")
+        if on_robot1_ready:
+            on_robot1_ready()
+
+    def wait_and_notify_2():
+        print("⏳ [Waffle 2] /keepout_filter_mask 대기 중 (Domain 32)...")
+        wait_for_topic_by_domain('/keepout_filter_mask', 32)
+        print("✅ [Waffle 2] keepout_filter 확인 완료!")
+        if on_robot2_ready:
+            on_robot2_ready()
     
-    threading.Thread(target=wait_and_notify, daemon=True).start()
+    # 두 로봇의 토픽 대기를 각각 독립된 스레드로 실행
+    threading.Thread(target=wait_and_notify_1, daemon=True).start()
+    threading.Thread(target=wait_and_notify_2, daemon=True).start()
 
 def kill_all():
     print("모든 기기 종료 중...")
     for device, ssh, stdin in sessions:
         name = device["name"]
-        target = device["kill_target"]  # ← 기기별 종료 대상 사용
+        target = device["kill_target"]
         try:
-            # SIGINT 전송
-            ssh.exec_command(f"pkill -SIGINT -f '{target}'")
-            
-            # 꺼졌는지 확인
+            attempt = 0
             while True:
-                time.sleep(5)
+                attempt += 1
+                ssh.exec_command(f"pkill -SIGINT -f '{target}'")
+                print(f"[{name}] SIGINT 전송 ({attempt}회)")
+
+                time.sleep(3)
                 _, stdout, _ = ssh.exec_command(f"pgrep -f '{target}'")
-                stdout.channel.recv_exit_status()
                 result = stdout.read().decode().strip()
-                
+                stdout.channel.recv_exit_status()
+
                 if not result:
                     print(f"[{name}] 종료 완료")
                     break
-                else:
-                    print(f"[{name}] 아직 실행 중... SIGINT 재전송")
-                    ssh.exec_command(f"pkill -SIGINT -f '{target}'")
-            
+
+                print(f"[{name}] 아직 실행 중... 재전송")
+
             ssh.close()
         except Exception as e:
             print(f"[{name}] 종료 오류: {e}")
     sessions.clear()
-    

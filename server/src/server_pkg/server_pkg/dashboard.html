@@ -2,107 +2,524 @@
 <html lang="ko">
 <head>
   <meta charset="UTF-8">
-  <title>🤖 로봇 미션 대시보드</title>
+  <title>로봇 미션 대시보드</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
   <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: 'Segoe UI', sans-serif;
-      background: #0f172a;
-      color: #e2e8f0;
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0f172a; --surface: #1e293b; --surface2: #273348; --border: #334155;
+      --text: #e2e8f0; --text-muted: #94a3b8; --text-faint: #64748b;
+      --blue: #38bdf8; --blue-bg: rgba(56,189,248,0.08); --blue-border: rgba(56,189,248,0.3);
+      --green: #4ade80; --green-bg: rgba(74,222,128,0.08); --green-border: rgba(74,222,128,0.3);
+      --amber: #fbbf24; --amber-bg: rgba(251,191,36,0.08); --amber-border: rgba(251,191,36,0.3);
+      --red: #f87171; --red-bg: rgba(248,113,113,0.08); --red-border: rgba(248,113,113,0.3);
+      --radius: 10px; --radius-sm: 6px;
+    }
+    body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; padding: 32px 16px; }
+    
+    /* ─── 레이아웃 분할 (좌/우) ─── */
+    .layout-wrapper {
+      display: flex;
+      flex-direction: row;
+      gap: 24px;
+      width: 100%;
+      max-width: 1400px;
+      margin: 0 auto;
+      align-items: stretch;
+    }
+    .left-col {
+      flex: 1;
+      min-width: 380px;
+      max-width: 450px;
       display: flex;
       flex-direction: column;
+      gap: 20px;
+    }
+    .right-col {
+      flex: 2;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    .topbar { width: 100%; display: flex; align-items: center; justify-content: space-between; }
+    .topbar-left { display: flex; align-items: center; gap: 10px; }
+    .topbar-left i { font-size: 22px; color: var(--blue); }
+    .topbar-title { font-size: 17px; font-weight: 600; color: var(--text); }
+    .topbar-sub { font-size: 12px; color: var(--text-faint); margin-top: 1px; }
+    .sys-badge { font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 20px; border: 1px solid var(--border); color: var(--text-muted); background: var(--surface); transition: all 0.2s; }
+    .sys-badge.ready { color: var(--green); background: var(--green-bg); border-color: var(--green-border); }
+    .sys-badge.running { color: var(--blue); background: var(--blue-bg); border-color: var(--blue-border); }
+    .sys-badge.stopped { color: var(--amber); background: var(--amber-bg); border-color: var(--amber-border); }
+    
+    .panel { width: 100%; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; display: flex; flex-direction: column; gap: 14px; }
+    .panel-label { font-size: 10px; font-weight: 700; letter-spacing: 0.1em; color: var(--text-faint); text-transform: uppercase; }
+    
+    .robot-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .robot-card { background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; cursor: pointer; transition: border-color 0.15s, background 0.15s; user-select: none; }
+    .robot-card:hover { border-color: #475569; }
+    .robot-card.selected { border-color: var(--blue-border); background: var(--blue-bg); }
+    .robot-card-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+    .robot-name { font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+    .robot-name i { font-size: 16px; color: var(--text-muted); }
+    .robot-card.selected .robot-name i { color: var(--blue); }
+    .robot-check { width: 20px; height: 20px; border-radius: 50%; border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-size: 11px; color: transparent; transition: all 0.15s; }
+    .robot-card.selected .robot-check { background: var(--blue); border-color: var(--blue); color: #0f172a; }
+    .robot-status { font-size: 12px; color: var(--text-faint); display: flex; align-items: center; gap: 5px; }
+    
+    .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--border); flex-shrink: 0; transition: background 0.3s; }
+    .dot.waiting { background: var(--amber); }
+    .dot.ready { background: var(--green); }
+    .dot.off { background: var(--border); }
+    
+    .metric-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+    .metric-card { background: var(--surface2); border-radius: var(--radius-sm); padding: 12px 14px; }
+    .metric-val { font-size: 22px; font-weight: 700; color: var(--text); }
+    .metric-lbl { font-size: 11px; color: var(--text-faint); margin-top: 2px; }
+    
+    .btn-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .btn { padding: 13px; border: 1px solid; border-radius: var(--radius-sm); font-size: 14px; font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 7px; transition: opacity 0.15s, transform 0.1s; }
+    .btn:active:not(:disabled) { transform: scale(0.97); }
+    .btn:disabled { opacity: 0.3; cursor: not-allowed; }
+    .btn-start { background: var(--green-bg); color: var(--green); border-color: var(--green-border); }
+    .btn-stop  { background: var(--red-bg);   color: var(--red);   border-color: var(--red-border); }
+    .btn-signal { background: var(--amber-bg); color: var(--amber); border-color: var(--amber-border); padding: 11px; }
+    
+    .log-box { background: #0d1626; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 12px; min-height: 120px; max-height: 250px; overflow-y: auto; display: flex; flex-direction: column; gap: 3px; font-family: 'Consolas', 'Monaco', monospace; }
+    .log-entry { font-size: 12px; display: flex; gap: 10px; line-height: 1.5; }
+    .log-ts { color: var(--text-faint); flex-shrink: 0; }
+    .log-msg.info    { color: var(--blue); }
+    .log-msg.success { color: var(--green); }
+    .log-msg.warn    { color: var(--amber); }
+    .log-msg.error   { color: var(--red); }
+
+    /* ─── 맵 캔버스 영역 스타일 ─── */
+    .map-area {
+      flex: 1;
+      min-height: 0;
+      display: flex;
       align-items: center;
       justify-content: center;
-      min-height: 100vh;
-      gap: 24px;
     }
-    h1 { font-size: 1.8rem; letter-spacing: 0.05em; color: #7dd3fc; }
-    .card {
-      background: #1e293b;
-      border: 1px solid #334155;
-      border-radius: 16px;
-      padding: 32px 48px;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 16px;
-      width: 380px;
+    #mapContainer {
+      position: relative;
+      height: 100%;
+      width: auto;
+      max-width: 100%;
+      /* 세로로 회전: 원본(69x48)을 90도 돌린 비율(48x69) */
+      aspect-ratio: 48 / 69;
+      background-color: #000;
+      /* 맵 이미지는 canvas에서 직접 그려 회전시키므로 background-image 제거 */
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      overflow: hidden;
+      image-rendering: pixelated; /* 작은 맵 이미지를 선명하게 렌더링 */
     }
-    .label { font-size: 0.85rem; color: #94a3b8; letter-spacing: 0.08em; }
-    button {
+    #mapCanvas {
+      position: absolute;
+      top: 0;
+      left: 0;
       width: 100%;
-      padding: 14px;
-      border: none;
-      border-radius: 10px;
-      font-size: 1.1rem;
-      font-weight: 700;
-      cursor: pointer;
-      transition: opacity 0.2s, transform 0.1s;
+      height: 100%;
+      image-rendering: pixelated; /* 캔버스 그림자 선명도 유지 */
     }
-    button:active { transform: scale(0.97); }
-    button:disabled { opacity: 0.4; cursor: not-allowed; }
-    #btn-start  { background: #22c55e; color: #fff; }
-    .signal-btn { background: #f59e0b; color: #fff; flex: 1; }
-    .btn-group { display: flex; gap: 12px; width: 100%; }
-    #status {
-      font-size: 0.9rem;
-      color: #64748b;
-      min-height: 1.2em;
-      text-align: center;
+    .legend {
+      display: flex; gap: 20px; justify-content: center; margin-top: 10px; font-size: 13px; font-weight: 600;
     }
-    .divider { width: 100%; border: none; border-top: 1px solid #334155; }
   </style>
 </head>
 <body>
-  <h1>🤖 로봇 미션 대시보드</h1>
 
-  <div class="card">
-    <span class="label">MISSION CONTROL</span>
-    <button id="btn-start" onclick="sendStart()" disabled>▶ 미션 시작</button>
+  <div class="layout-wrapper">
+    <div class="left-col">
+      <div class="topbar">
+        <div class="topbar-left">
+          <i class="ti ti-robot"></i>
+          <div>
+            <div class="topbar-title">미션 관리 대시보드</div>
+            <div class="topbar-sub">AutoFactory ROS2 Control System</div>
+          </div>
+        </div>
+        <span class="sys-badge" id="sys-badge">대기 중</span>
+      </div>
 
-    <hr class="divider">
+      <div class="panel">
+        <div class="panel-label">로봇 선택</div>
+        <div class="robot-grid">
+          <div class="robot-card selected" id="card-1" onclick="toggleRobot(1)">
+            <div class="robot-card-top">
+              <div class="robot-name"><i class="ti ti-device-gamepad-2"></i> Waffle 1</div>
+              <div class="robot-check" id="check-1"><i class="ti ti-check"></i></div>
+            </div>
+            <div class="robot-status">
+              <span class="dot waiting" id="dot-1"></span>
+              <span id="rstatus-1">keepout 대기 중</span>
+            </div>
+          </div>
+          <div class="robot-card selected" id="card-2" onclick="toggleRobot(2)">
+            <div class="robot-card-top">
+              <div class="robot-name"><i class="ti ti-device-gamepad-2"></i> Waffle 2</div>
+              <div class="robot-check" id="check-2"><i class="ti ti-check"></i></div>
+            </div>
+            <div class="robot-status">
+              <span class="dot waiting" id="dot-2"></span>
+              <span id="rstatus-2">keepout 대기 중</span>
+            </div>
+          </div>
+        </div>
+      </div>
 
-    <span class="label">EXTERNAL SIGNALS</span>
-    <div class="btn-group">
-      <button class="signal-btn" onclick="sendSignal('A')" disabled>✅ A 해제</button>
-      <button class="signal-btn" onclick="sendSignal('C')" disabled>✅ C 해제</button>
-    </div>
+      <div class="panel">
+        <div class="panel-label">시스템 상태</div>
+        <div class="metric-row">
+          <div class="metric-card">
+            <div class="metric-val" id="m-active">0 / 0</div>
+            <div class="metric-lbl">활성 로봇</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-val" id="m-ready">0 / 0</div>
+            <div class="metric-lbl">keepout 준비</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-val" id="m-mission">대기</div>
+            <div class="metric-lbl">미션 상태</div>
+          </div>
+        </div>
+      </div>
 
-    <p id="status">대기 중...</p>
-  </div>
+      <div class="panel">
+        <div class="panel-label">미션 제어</div>
+        <div class="btn-row">
+          <button class="btn btn-start" id="btn-start" onclick="sendStart()" disabled>
+            <i class="ti ti-player-play"></i> 미션 시작
+          </button>
+          <button class="btn btn-stop" id="btn-pause" onclick="togglePause()" disabled>
+            <i class="ti ti-player-pause"></i> 미션 정지
+          </button>
+        </div>
+      </div>
 
-  <script>
+      <div class="panel">
+        <div class="panel-label">외부 신호</div>
+        <div class="btn-row">
+          <button class="btn btn-signal" id="btn-a" onclick="sendSignal('A')" disabled>
+            <i class="ti ti-lock-open"></i> A 구역 해제
+          </button>
+          <button class="btn btn-signal" id="btn-c" onclick="sendSignal('C')" disabled>
+            <i class="ti ti-lock-open"></i> C 구역 해제
+          </button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-label">시스템 로그</div>
+        <div class="log-box" id="log-box"></div>
+      </div>
+    </div> <div class="right-col">
+      <div class="panel" style="height: 100%;">
+        <div class="panel-label">실시간 위치 모니터링</div>
+        
+        <div class="map-area">
+          <div id="mapContainer">
+            <canvas id="mapCanvas"></canvas>
+          </div>
+        </div>
+
+        <div class="legend">
+          <div style="color: #38bdf8;"><i class="ti ti-circle-filled"></i> Waffle 1</div>
+          <div style="color: #f87171;"><i class="ti ti-circle-filled"></i> Waffle 2</div>
+        </div>
+      </div>
+    </div> </div> <script>
+  // ==========================================
+  // 기존 컨트롤러 스크립트
+  // ==========================================
+  const state = { selected: [true, true], keepout: [false, false], running: false, paused: false };
+
+  function ts() { return new Date().toTimeString().slice(0, 8); }
+
+  function addLog(msg, type = 'info') {
+    const box = document.getElementById('log-box');
+    const el = document.createElement('div');
+    el.className = 'log-entry';
+    el.innerHTML = `<span class="log-ts">${ts()}</span><span class="log-msg ${type}">${msg}</span>`;
+    box.appendChild(el);
+    box.scrollTop = box.scrollHeight;
+  }
+
+  function updateUI() {
+    const selCount = state.selected.filter(Boolean).length;
+    const readyCount = state.selected.map((s, i) => s && state.keepout[i]).filter(Boolean).length;
+    const allReady = selCount > 0 && readyCount === selCount;
+
+    document.getElementById('m-active').textContent = `${selCount} / 2`;
+    document.getElementById('m-ready').textContent = `${readyCount} / ${selCount || 0}`;
+
+    const btnStart = document.getElementById('btn-start');
+    const btnPause = document.getElementById('btn-pause');
+
+    btnStart.disabled = !allReady || state.running;
+    btnPause.disabled = !state.running;
+
+    const badge = document.getElementById('sys-badge');
+    const missionEl = document.getElementById('m-mission');
     
-    async function sendStart() {
-      document.getElementById('btn-start').disabled = true;
-      const res = await fetch('/start', { method: 'POST' });
-      const data = await res.json();
-      setStatus(data.message, '#22c55e');
-      
-      // 시작 후 A, C 신호 버튼 모두 활성화
-      document.querySelectorAll('.signal-btn').forEach(btn => btn.disabled = false);
+    if (state.running) {
+      if (state.paused) {
+        badge.className = 'sys-badge stopped'; badge.textContent = '일시정지';
+        missionEl.textContent = '정지됨';
+        btnPause.className = 'btn btn-start'; 
+        btnPause.innerHTML = '<i class="ti ti-player-play"></i> 미션 재개';
+      } else {
+        badge.className = 'sys-badge running'; badge.textContent = '운영 중';
+        missionEl.textContent = '실행 중';
+        btnPause.className = 'btn btn-stop'; 
+        btnPause.innerHTML = '<i class="ti ti-player-pause"></i> 미션 정지';
+      }
+    } else if (allReady) {
+      badge.className = 'sys-badge ready'; badge.textContent = '준비 완료';
+      missionEl.textContent = '준비';
+    } else {
+      badge.className = 'sys-badge'; badge.textContent = '대기 중';
+      missionEl.textContent = '대기';
     }
+  }
 
-    async function sendSignal(wp) {
+  function toggleRobot(idx) {
+    if(state.running) {
+        addLog("미션 시작 후 로봇 변경 불가", "warn");
+        return;
+    }
+    const i = idx - 1;
+    state.selected[i] = !state.selected[i];
+
+    const card = document.getElementById(`card-${idx}`);
+    const dot = document.getElementById(`dot-${idx}`);
+    const statusEl = document.getElementById(`rstatus-${idx}`);
+
+    if (state.selected[i]) {
+      card.classList.add('selected');
+      if (state.keepout[i]) {
+        dot.className = 'dot ready';
+        statusEl.textContent = 'keepout 준비 완료';
+      } else {
+        dot.className = 'dot waiting';
+        statusEl.textContent = 'keepout 대기 중';
+      }
+      addLog(`Waffle ${idx} 활성화됨`, 'info');
+    } else {
+      card.classList.remove('selected');
+      dot.className = 'dot off';
+      statusEl.textContent = '비활성화됨';
+      addLog(`Waffle ${idx} 비활성화됨`, 'warn');
+    }
+    updateUI();
+  }
+
+  function markReady(idx) {
+    const i = idx - 1;
+    if (state.keepout[i]) return;
+    state.keepout[i] = true;
+    if (state.selected[i]) {
+      document.getElementById(`dot-${idx}`).className = 'dot ready';
+      document.getElementById(`rstatus-${idx}`).textContent = 'keepout 준비 완료';
+      addLog(`Waffle ${idx} keepout 필터 확인됨`, 'success');
+    }
+    updateUI();
+  }
+
+  async function sendStart() {
+    const selectedRobots = [];
+    if (state.selected[0]) selectedRobots.push(1);
+    if (state.selected[1]) selectedRobots.push(2);
+
+    try {
+      const res = await fetch('/start', { 
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ selected: selectedRobots })
+      });
+      const data = await res.json();
+      if (data.status === 'ok' || data.status === 'already') {
+        state.running = true;
+        state.paused = false;
+        document.querySelectorAll('#btn-a, #btn-c').forEach(b => b.disabled = false);
+        addLog('미션 시작됨 — ' + (data.message || ''), 'success');
+        updateUI();
+        connectLogStream();
+      } else {
+        addLog('미션 시작 불가: ' + data.message, 'error');
+      }
+    } catch (e) { addLog('미션 시작 실패: ' + e.message, 'error'); }
+  }
+
+  async function togglePause() {
+    if (!state.running) return;
+    const endpoint = state.paused ? '/resume' : '/pause';
+    try {
+      const res = await fetch(endpoint, { method: 'POST' });
+      const data = await res.json();
+      state.paused = !state.paused;
+      addLog(data.message, state.paused ? 'warn' : 'success');
+      updateUI();
+    } catch (e) { addLog('명령 실패: ' + e.message, 'error'); }
+  }
+
+  async function sendSignal(wp) {
+    try {
       const res = await fetch(`/signal/${wp}`, { method: 'POST' });
       const data = await res.json();
-      setStatus(data.message, '#f59e0b');
-    }
+      addLog(`신호 전송 [${wp}] — ` + (data.message || ''), 'warn');
+    } catch (e) { addLog(`신호 전송 실패 [${wp}]: ` + e.message, 'error'); }
+  }
 
-    function setStatus(msg, color) {
-      const el = document.getElementById('status');
-      el.textContent = msg;
-      el.style.color = color;
-    }
-    
-    const evtSource = new EventSource('/ready_stream');
-    evtSource.onmessage = function(e) {
-        if (e.data === 'ready') {
-            document.getElementById('btn-start').disabled = false;
-            setStatus('모든 기기 준비 완료! 시작 버튼을 누르세요.', '#22c55e');
-            evtSource.close();
-        }
+  const evtSource = new EventSource('/ready_stream');
+  evtSource.onmessage = function (e) {
+    if (e.data === 'ready_1') markReady(1);
+    if (e.data === 'ready_2') markReady(2);
+    if (state.keepout[0] && state.keepout[1]) evtSource.close();
+  };
+  evtSource.onerror = function () {};
+
+  function connectLogStream() {
+    const logSource = new EventSource('/log_stream');
+    logSource.onmessage = function (e) {
+      try { const entry = JSON.parse(e.data); addLog(entry.msg, entry.level); } catch (_) {}
     };
-  </script>
+    logSource.onerror = function () {
+      logSource.close();
+      if (state.running) setTimeout(connectLogStream, 2000);
+    };
+  }
+
+  addLog('시스템 초기화 완료. keepout 필터 대기 중.', 'info');
+  updateUI();
+
+  // ==========================================
+  // 실시간 맵 렌더링 (Canvas) 스크립트
+  // ==========================================
+  
+  const canvas = document.getElementById('mapCanvas');
+  const ctx = canvas.getContext('2d');
+
+  // 원본 맵(map_test.pgm) 픽셀 크기
+  const MAP_W = 69;
+  const MAP_H = 48;
+
+  // 캔버스 내부 해상도 배율 (마커를 작고 선명하게 그리기 위함)
+  const SCALE = 8;
+
+  // 90도 회전 + 배율 적용한 캔버스 크기
+  canvas.width = MAP_H * SCALE;   // 48 * 8 = 384
+  canvas.height = MAP_W * SCALE;  // 69 * 8 = 552
+  ctx.imageSmoothingEnabled = false; // 맵 이미지 픽셀 선명도 유지
+
+  // map_test.yaml 좌표 매핑 값
+  const MAP_RESOLUTION = 0.050;
+  const MAP_ORIGIN_X = -1.950;
+  const MAP_ORIGIN_Y = -1.182;
+
+  // 맵 이미지를 canvas에 직접 그리기 위해 로드
+  const mapImg = new Image();
+  let mapLoaded = false;
+  let lastPoses = {};
+  mapImg.onload = () => { mapLoaded = true; render(lastPoses); };
+  mapImg.src = '/static/map.png';
+
+  // ROS 좌표 -> (회전 전) 배율 적용된 맵 캔버스 좌표
+  function rosToCanvas(x, y) {
+      const px = (x - MAP_ORIGIN_X) / MAP_RESOLUTION;
+      const py = (y - MAP_ORIGIN_Y) / MAP_RESOLUTION;
+      // ROS Y축은 위로 증가, Canvas Y축은 아래로 증가하므로 뒤집음
+      return { x: px * SCALE, y: (MAP_H - py) * SCALE };
+  }
+
+  // 맵과 점을 함께 90도 회전시키는 변환
+  // (시계방향 90도. 반대로 돌리려면 아래 두 줄을
+  //  ctx.translate(0, canvas.height); ctx.rotate(-Math.PI / 2); 로 교체)
+  function applyRotation() {
+      ctx.translate(canvas.width, 0);
+      ctx.rotate(Math.PI / 2);
+  }
+
+  // 원본 맵 좌표 -> 회전이 적용된 최종 캔버스 좌표로 수동 변환
+  // (applyRotation: translate(width,0) 후 90도 회전과 동일)
+  function rotatePoint(p) {
+      return { x: canvas.width - p.y, y: p.x };
+  }
+
+  // 십자 마커 (방향 정보가 없을 때 사용)
+  function drawCross(cx, cy, color) {
+      cx = Math.round(cx);
+      cy = Math.round(cy);
+      ctx.fillStyle = color;
+      ctx.fillRect(cx - 9, cy - 1, 18, 3); // 가로 막대
+      ctx.fillRect(cx - 1, cy - 9, 3, 18); // 세로 막대
+  }
+
+  // 방향 화살표 마커 (yaw가 있을 때 사용)
+  // theta(ROS yaw)는 맵을 90도 돌린 것에 맞춰 화면 방향벡터로 변환됨.
+  // 방향이 반대/90도 틀어져 보이면 아래 dx, dy 식을 조정하면 됨:
+  //   현재: dx=sin(theta), dy=cos(theta)
+  //   반대로: dx=-sin(theta), dy=-cos(theta)  /  좌우반전: dx=-sin, dy=cos 등
+  function drawArrow(cx, cy, theta, color) {
+      const dx = Math.sin(theta);   // 화면상 진행방향 x
+      const dy = Math.cos(theta);   // 화면상 진행방향 y
+      const px = -dy, py = dx;      // 진행방향에 수직인 벡터
+      const front = 11;            // 앞쪽(코) 길이
+      const back  = 7;             // 뒤쪽 길이
+      const half  = 7;             // 뒤쪽 폭의 절반
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.moveTo(cx + dx * front,             cy + dy * front);
+      ctx.lineTo(cx - dx * back + px * half,  cy - dy * back + py * half);
+      ctx.lineTo(cx - dx * back - px * half,  cy - dy * back - py * half);
+      ctx.closePath();
+      ctx.fill();
+  }
+
+  function drawMarker(cx, cy, theta, color) {
+      if (typeof theta === 'number') {
+          drawArrow(cx, cy, theta, color);
+      } else {
+          drawCross(cx, cy, color);
+      }
+  }
+
+  function render(poses) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // 1) 맵 이미지: 회전 변환 안에서 그림
+      ctx.save();
+      applyRotation();
+      if (mapLoaded) ctx.drawImage(mapImg, 0, 0, MAP_W * SCALE, MAP_H * SCALE);
+      ctx.restore();
+
+      // 2) 로봇 마커: 회전된 좌표를 직접 계산해 변환 없이 그림 (픽셀 선명)
+      // 로봇 1 (Waffle 1 - 파란색)
+      if (poses[1] && typeof poses[1].x === 'number') {
+          const p1 = rotatePoint(rosToCanvas(poses[1].x, poses[1].y));
+          drawMarker(p1.x, p1.y, poses[1].theta, '#38bdf8');
+      }
+
+      // 로봇 2 (Waffle 2 - 빨간색)
+      if (poses[2] && typeof poses[2].x === 'number') {
+          const p2 = rotatePoint(rosToCanvas(poses[2].x, poses[2].y));
+          drawMarker(p2.x, p2.y, poses[2].theta, '#f87171');
+      }
+  }
+
+  // '/pose_stream' 엔드포인트 연결
+  const poseSource = new EventSource('/pose_stream');
+
+  poseSource.onmessage = function(event) {
+      try {
+          lastPoses = JSON.parse(event.data);
+          render(lastPoses);
+      } catch (e) {
+          console.error("Pose 파싱 에러:", e);
+      }
+  };
+</script>
 </body>
 </html>
