@@ -3,7 +3,6 @@
   ******************************************************************************
   * @file           : main.h
   * @brief          : Header for main.c file.
-  *                   This file contains the common defines of the application.
   ******************************************************************************
   * @attention
   *
@@ -31,39 +30,24 @@ extern "C" {
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include <stdbool.h>
 /* USER CODE END Includes */
 
 /* Exported types ------------------------------------------------------------*/
 /* USER CODE BEGIN ET */
-typedef struct
-{
-  bool valid;
-  bool sensor;
-} NodeState;
 /* USER CODE END ET */
 
 /* Exported constants --------------------------------------------------------*/
 /* USER CODE BEGIN EC */
-#define NODE_COUNT          4U
-#define CAN_ID_BASE         0x010U
-
-#define FLASH_NODE_ID_ADDR  0x08060000U
-#define FLASH_NODE_ID_MAGIC 0xA5A55A5AU
 /* USER CODE END EC */
 
 /* Exported macro ------------------------------------------------------------*/
 /* USER CODE BEGIN EM */
-
 /* USER CODE END EM */
 
 /* Exported functions prototypes ---------------------------------------------*/
 void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
-extern uint8_t   g_node_id;
-extern NodeState node_states[NODE_COUNT + 1U];
-bool ReadSensor(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
@@ -81,17 +65,41 @@ bool ReadSensor(void);
 #define SWO_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
-#define MCP2515_CS_Pin GPIO_PIN_4
-#define MCP2515_CS_GPIO_Port GPIOA
-#define MCP2515_INT_Pin GPIO_PIN_0
-#define MCP2515_INT_GPIO_Port GPIOB
-#define SENSOR_Pin GPIO_PIN_1
-#define SENSOR_GPIO_Port GPIOB
+/* 약통 정보 (1번 보드 CAN 메세지에서 수신) */
+typedef struct {
+  uint8_t seq;    /* 시퀀스 번호 */
+  uint8_t color;  /* 'R'=빨강, 'B'=파랑, 'N'=NG, '?'=미수신 */
+} ContainerInfo;
 
-#define ACT1_IN1_Pin       GPIO_PIN_8
-#define ACT1_IN1_GPIO_Port GPIOB
-#define ACT1_IN2_Pin       GPIO_PIN_9
-#define ACT1_IN2_GPIO_Port GPIOB
+/* TB6600 스텝모터 제어 핀 */
+#define STEPPER_PUL_Pin       GPIO_PIN_0   /* PC0: 펄스 */
+#define STEPPER_PUL_GPIO_Port GPIOC
+#define STEPPER_DIR_Pin       GPIO_PIN_1   /* PC1: 방향 */
+#define STEPPER_DIR_GPIO_Port GPIOC
+#define STEPPER_ENA_Pin       GPIO_PIN_2   /* PC2: 활성화 (LOW=ON) */
+#define STEPPER_ENA_GPIO_Port GPIOC
+
+/* 알약 IR 센서 (NPN형: 감지 시 LOW) */
+#define SENSOR_PILL_Pin       GPIO_PIN_8
+#define SENSOR_PILL_GPIO_Port GPIOB
+
+/* MCP2515 CAN 컨트롤러 */
+#define MCP2515_CS_Pin        GPIO_PIN_4   /* PA4: SPI CS */
+#define MCP2515_CS_GPIO_Port  GPIOA
+#define MCP2515_INT_Pin       GPIO_PIN_0   /* PB0: INT (EXTI0 FALLING) */
+#define MCP2515_INT_GPIO_Port GPIOB
+
+/* CAN 메세지 ID */
+#define CAN_ID_1ST_TX        0x101U  /* 1번 보드 → 전체: 약통 정보 (seq, is_ok, color) */
+
+/* PA5 = SPI1_SCK (AF5 고정) — LED 기능 비활성, 핀 정의만 유지 */
+#define LED_Pin               GPIO_PIN_5
+#define LED_GPIO_Port         GPIOA
+
+/* 1번 보드 → 2번 보드 CAN 벨트 제어 프로토콜 */
+#define CAN_ID_2ND_TX        0x102U
+#define CAN_CMD_BELT_STOP    0x10U  /* 벨트 정지 요청 */
+#define CAN_CMD_BELT_RESUME  0x11U  /* 벨트 재개 요청 */
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus
