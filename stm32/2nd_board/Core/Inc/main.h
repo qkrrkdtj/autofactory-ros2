@@ -90,7 +90,11 @@ typedef struct {
 #define MCP2515_INT_GPIO_Port GPIOB
 
 /* CAN 메세지 ID */
-#define CAN_ID_1ST_TX        0x101U  /* 1번 보드 → 전체: 약통 정보 (seq, is_ok, color) */
+#define CAN_ID_1ST_TX        0x101U  /* 1번 보드 → 전체: 약통 정보 (seq, color) */
+#define CAN_MSG_CONTAINER    0x01U
+#define CAN_COLOR_RED        'R'     /* 빨간 약통 (정상) */
+#define CAN_COLOR_BLUE       'B'     /* 파란 약통 (정상) */
+#define CAN_COLOR_NG         'N'     /* 불량 */
 
 /* PA5 = SPI1_SCK (AF5 고정) — LED 기능 비활성, 핀 정의만 유지 */
 #define LED_Pin               GPIO_PIN_5

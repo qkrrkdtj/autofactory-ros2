@@ -58,6 +58,7 @@ osMessageQueueId_t containerQueue;       /* 1번 보드 약통 정보 수신 큐
 
 osSemaphoreId_t   sem_dispense_done;     /* TIM2 ISR → Task: 스텝 완료 신호 */
 osSemaphoreId_t   sem_uart_trigger;      /* UART ISR → Task: 수동 트리거 신호 */
+osSemaphoreId_t   sem_pill_trigger;      /* PB8 IR 센서 EXTI → Task: 약통 도착 신호 */
 volatile uint32_t tim_toggle_count   = 0U;
 volatile uint32_t tim_target_toggles = 0U;
 static uint8_t    uart_rx_buf;           /* UART 수신 1바이트 버퍼 */
@@ -82,6 +83,50 @@ int __io_putchar(int ch)
 {
   HAL_UART_Transmit(&huart2, (uint8_t *)&ch, 1, HAL_MAX_DELAY);
   return ch;
+}
+
+/* 2번 보드가 STOP을 보낸 뒤에만 RESUME을 1회 전송한다. */
+static uint8_t g_belt_stopped_by_pill = 0U;
+
+static void PillSensor_DrainPending(void)
+{
+  while (osSemaphoreAcquire(sem_pill_trigger, 0U) == osOK)
+  {
+  }
+}
+
+static void PillSensor_WaitClearAndRearm(uint32_t debounce_ms)
+{
+  while (HAL_GPIO_ReadPin(SENSOR_PILL_GPIO_Port, SENSOR_PILL_Pin) == GPIO_PIN_RESET)
+    osDelay(10U);
+
+  osDelay(debounce_ms);
+  PillSensor_DrainPending();
+}
+
+static HAL_StatusTypeDef Belt_SendStop(MCP2515_CanMsg *can_msg)
+{
+  can_msg->data[0] = CAN_CMD_BELT_STOP;
+  osMutexAcquire(canMutex, osWaitForever);
+  HAL_StatusTypeDef st = MCP2515_Send(&hmcp2515, can_msg);
+  osMutexRelease(canMutex);
+  if (st == HAL_OK)
+    g_belt_stopped_by_pill = 1U;
+  return st;
+}
+
+static HAL_StatusTypeDef Belt_SendResume(MCP2515_CanMsg *can_msg)
+{
+  if (g_belt_stopped_by_pill == 0U)
+    return HAL_BUSY;
+
+  can_msg->data[0] = CAN_CMD_BELT_RESUME;
+  osMutexAcquire(canMutex, osWaitForever);
+  HAL_StatusTypeDef st = MCP2515_Send(&hmcp2515, can_msg);
+  osMutexRelease(canMutex);
+  if (st == HAL_OK)
+    g_belt_stopped_by_pill = 0U;
+  return st;
 }
 /* USER CODE END 0 */
 
@@ -153,6 +198,14 @@ int main(void)
 
   sem_uart_trigger = osSemaphoreNew(1U, 0U, NULL);
   if (sem_uart_trigger == NULL) Error_Handler();
+
+  /* PB8 IR 센서 (EXTI line 8) 세마포어 — 생성 후 NVIC 활성화 */
+  sem_pill_trigger = osSemaphoreNew(1U, 0U, NULL);
+  if (sem_pill_trigger == NULL) Error_Handler();
+
+  __HAL_GPIO_EXTI_CLEAR_IT(SENSOR_PILL_Pin);
+  HAL_NVIC_SetPriority(EXTI9_5_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
 
   /* MCP2515 INT (PB0) 세마포어 — 생성 후 NVIC 활성화 */
   sem_can_rx = osSemaphoreNew(2U, 0U, NULL);
@@ -415,18 +468,25 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PB0 PB8 */
-  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_8;
+  /*Configure GPIO pin : PB0 */
+  GPIO_InitStruct.Pin = GPIO_PIN_0;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  /* USER CODE BEGIN MX_GPIO_Init_2 */
-  /* PB8 센서: PULLUP으로 재설정 */
-  GPIO_InitStruct.Pin  = SENSOR_PILL_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  /*Configure GPIO pin : PB8 */
+  GPIO_InitStruct.Pin = GPIO_PIN_8;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
-  HAL_GPIO_Init(SENSOR_PILL_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI9_5_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
+
+  /* USER CODE BEGIN MX_GPIO_Init_2 */
+  /* PB8 EXTI NVIC를 CubeMX가 조기 활성화하므로, sem_pill_trigger 생성 전까지 비활성화 */
+  HAL_NVIC_DisableIRQ(EXTI9_5_IRQn);
 
   /* PB0 = MCP2515 INT: FALLING EXTI — NVIC는 sem_can_rx 생성 후 별도 활성화 */
   GPIO_InitStruct.Pin  = MCP2515_INT_Pin;
@@ -448,6 +508,8 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
   if (GPIO_Pin == MCP2515_INT_Pin)
     osSemaphoreRelease(sem_can_rx);
+  else if (GPIO_Pin == SENSOR_PILL_Pin)
+    osSemaphoreRelease(sem_pill_trigger);
 }
 
 /* 1번 보드가 CAN 0x101로 전송하는 약통 정보(seq, color)를 수신해 containerQueue에 적재한다.
@@ -473,7 +535,7 @@ static void CanRxTask(void *argument)
     if (rx.id != CAN_ID_1ST_TX || rx.dlc < 3U)
       continue;
 
-    ContainerInfo info = { .seq = rx.data[0], .color = rx.data[2] };
+    ContainerInfo info = { .seq = rx.data[1], .color = rx.data[2] };
 
     if (osMessageQueuePut(containerQueue, &info, 0U, 0U) == osOK)
     {
@@ -537,6 +599,12 @@ void StartDefaultTask(void *argument)
   printf("[PILL] Ready.\r\n");
   printf("  d = dispense  s = slow-test(10steps)  e = ENA toggle  p = single pulse\r\n");
 
+  /* 부팅 시 스퓨리어스 EXTI 엣지로 쌓인 트리거 토큰 제거 */
+  PillSensor_DrainPending();
+
+  static GPIO_PinState prev_pill_sensor = GPIO_PIN_SET;
+  static uint8_t        pill_armed      = 1U;
+
   for (;;)
   {
     /* ── 진단 커맨드 처리 ──────────────────────────────────── */
@@ -589,8 +657,17 @@ void StartDefaultTask(void *argument)
     }
 
     /* ── 센서 / UART 디스펜스 트리거 ───────────────────────── */
-    uint8_t sensor_trig = (HAL_GPIO_ReadPin(SENSOR_PILL_GPIO_Port, SENSOR_PILL_Pin) == GPIO_PIN_RESET);
-    uint8_t uart_trig   = (osSemaphoreAcquire(sem_uart_trigger, 0U) == osOK);
+    GPIO_PinState pill_now     = HAL_GPIO_ReadPin(SENSOR_PILL_GPIO_Port, SENSOR_PILL_Pin);
+    uint8_t       pill_falling = (pill_now == GPIO_PIN_RESET && prev_pill_sensor == GPIO_PIN_SET);
+    uint8_t       sem_pending  = (osSemaphoreAcquire(sem_pill_trigger, 0U) == osOK);
+    uint8_t       uart_trig    = (osSemaphoreAcquire(sem_uart_trigger, 0U) == osOK);
+    uint8_t       sensor_trig  = 0U;
+
+    /* 재무장 전에는 센서 트리거 무시, FALLING 엣지 + LOW일 때만 1회 인정 */
+    if (pill_armed && pill_now == GPIO_PIN_RESET && (pill_falling || sem_pending))
+      sensor_trig = 1U;
+    else if (sem_pending)
+      PillSensor_DrainPending();
 
     if (sensor_trig || uart_trig)
     {
@@ -604,6 +681,9 @@ void StartDefaultTask(void *argument)
       }
       printf("[PILL] Container seq=%u color=%c\r\n", info.seq, info.color);
 
+      if (sensor_trig)
+        pill_armed = 0U;
+
       /* ── CAN: 1번 보드 벨트 정지 요청 ──────────────────────── */
       MCP2515_CanMsg can_msg = {
         .id       = CAN_ID_2ND_TX,
@@ -611,9 +691,7 @@ void StartDefaultTask(void *argument)
         .data     = {CAN_CMD_BELT_STOP},
         .extended = false,
       };
-      osMutexAcquire(canMutex, osWaitForever);
-      HAL_StatusTypeDef tx_st = MCP2515_Send(&hmcp2515, &can_msg);
-      osMutexRelease(canMutex);
+      HAL_StatusTypeDef tx_st = Belt_SendStop(&can_msg);
       if (tx_st == HAL_OK)
         printf("[CAN] Belt STOP sent\r\n");
       else
@@ -634,23 +712,21 @@ void StartDefaultTask(void *argument)
       HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
       HAL_GPIO_WritePin(STEPPER_ENA_GPIO_Port, STEPPER_ENA_Pin, GPIO_PIN_SET);  /* 모터 비활성 */
 
-      /* ── CAN: 1번 보드 벨트 재개 요청 ──────────────────────── */
-      can_msg.data[0] = CAN_CMD_BELT_RESUME;
-      osMutexAcquire(canMutex, osWaitForever);
-      tx_st = MCP2515_Send(&hmcp2515, &can_msg);
-      osMutexRelease(canMutex);
+      osDelay(500U);  /* 알약 투입 완료 후 벨트 재개 전 안정화 대기 */
+
+      /* ── CAN: STOP을 보낸 경우에만 RESUME 1회 전송 ─────────── */
+      tx_st = Belt_SendResume(&can_msg);
       if (tx_st == HAL_OK)
         printf("[CAN] Belt RESUME sent\r\n");
+      else if (tx_st == HAL_BUSY)
+        printf("[CAN] Belt RESUME skipped (no prior STOP)\r\n");
       else
         printf("[CAN] Belt RESUME FAILED (TX error)\r\n");
 
-      osDelay(1000U);  /* 재트리거 방지 */
-
-      /* 센서 트리거인 경우 센서 해제까지 대기 */
       if (sensor_trig)
       {
-        while (HAL_GPIO_ReadPin(SENSOR_PILL_GPIO_Port, SENSOR_PILL_Pin) == GPIO_PIN_RESET)
-          osDelay(10U);
+        PillSensor_WaitClearAndRearm(500U);
+        pill_armed = 1U;
       }
     }
     else
@@ -660,6 +736,8 @@ void StartDefaultTask(void *argument)
       HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
       osDelay(10U);
     }
+
+    prev_pill_sensor = pill_now;
   }
   /* USER CODE END 5 */
 }
