@@ -8,16 +8,16 @@ OMX1 / OMX2 PC의 IP, 포트, 정책 이름, 로봇 실행 관련 설정을 한 
 OMX_CONFIGS = {
     "omx1": {
         # ---- 네트워크 (관제서버 <-> OMX1 PC 통신) ----
-        "host": "192.168.100.171",   # TODO: 실제 OMX1 PC IP로 교체
+        "host": "192.168.100.53",   # TODO: 실제 OMX1 PC IP로 교체
         "port": 9001,
 
         # ---- 역할 ----
-        "policy_name": "pick1_ep0_400",   # 적재 정책 (로그/메시지용 짧은 이름)
+        "policy_name": "pick1_diffusion_ep0_400",   # 적재 정책 (로그/메시지용 짧은 이름)
         "role": "loading",
 
         # ---- 로봇 실행 관련 (OMX1 PC 로컬에서만 사용) ----
         "robot_port": "/dev/omx_follower",          # TODO: 실제 시리얼 포트 확인 필요
-        "policy_path": "angrynose/pick1_ep0_400",     # HuggingFace repo_id (로컬 캐시 사용)
+        "policy_path": "angrynose/pick1_diffusion_ep0_400",     # HuggingFace repo_id (로컬 캐시 사용)
         "dataset_repo_id": "angrynose/pick1",          # 학습에 사용한 데이터셋 repo_id (메타데이터만 사용, action 이름 순서 확인용)
         "home_position": {
             "shoulder_pan.pos": 2.125,
@@ -31,32 +31,36 @@ OMX_CONFIGS = {
             "observation.images.front": {"index_or_path": '/dev/cam_front', "fps": 30, "width": 640, "height": 480},
             "observation.images.wrist": {"index_or_path": '/dev/cam_wrist', "fps": 30, "width": 640, "height": 480},
         },
+        "depart_target_count": 3,                          # A: 3개 차면 출발
+        "tray_camera_key": "observation.images.wrist",     # 트레이 보는 캠(cam_wrist)
     },
     "omx2": {
         # ---- 네트워크 (관제서버 <-> OMX2 PC 통신) ----
-        "host": "192.168.100.7",   # TODO: 실제 OMX2 PC IP로 교체
+        "host": "192.168.100.165",   # TODO: 실제 OMX2 PC IP로 교체
         "port": 9002,
 
         # ---- 역할 ----
-        "policy_name": "classify1_ep0_496",   # 분류 정책 (로그/메시지용 짧은 이름)
+        "policy_name": "classify1_diffusion_p0_496",   # 분류 정책 (로그/메시지용 짧은 이름)
         "role": "sorting",
 
         # ---- 로봇 실행 관련 (OMX2 PC 로컬에서만 사용) ----
         "robot_port": "/dev/omx_follower",          # TODO: 실제 시리얼 포트 확인 필요 (OMX1과 PC가 다르면 보통 같은 경로명일 수 있음)
-        "policy_path": "angrynose/classify1_ep0_316",   # HuggingFace repo_id (로컬 캐시 사용)
+        "policy_path": "angrynose/classify1_diffusion_ep0_316",   # HuggingFace repo_id (로컬 캐시 사용)
         "dataset_repo_id": "angrynose/classify1",   # TODO: 실제 학습 데이터셋 repo_id 확인 필요 (train_config.json의 dataset.repo_id 값)
         "home_position": {
-            "shoulder_pan.pos": -0.044,
-            "shoulder_lift.pos": -64.054,
-            "elbow_flex.pos": 53.114,
-            "wrist_flex.pos": 54.139,
-            "wrist_roll.pos": -6.569,
-            "gripper.pos": 50.110,
+            "shoulder_pan.pos": -0.757,
+            "shoulder_lift.pos": -63.175,
+            "elbow_flex.pos": 54.579,
+            "wrist_flex.pos": 55.389,
+            "wrist_roll.pos": -2.173,
+            "gripper.pos": 50.134,
         },
         "cameras": {
             "observation.images.front": {"index_or_path": '/dev/cam_front', "fps": 30, "width": 640, "height": 480},
             "observation.images.wrist": {"index_or_path": '/dev/cam_wrist', "fps": 30, "width": 640, "height": 480},
         },
+        "depart_target_count": 0,                          # C: 트레이 비면 출발
+        "tray_camera_key": "observation.images.wrist",     # 트레이 보는 캠(cam_wrist)
     },
 }
 
