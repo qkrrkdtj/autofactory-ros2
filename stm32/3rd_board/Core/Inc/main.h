@@ -41,6 +41,12 @@ typedef struct
   bool valid;
   bool sensor;
 } NodeState;
+
+typedef struct
+{
+  uint8_t seq;
+  char    color;
+} ContainerInfo;
 /* USER CODE END ET */
 
 /* Exported constants --------------------------------------------------------*/
@@ -50,6 +56,12 @@ typedef struct
 
 #define FLASH_NODE_ID_ADDR  0x08060000U
 #define FLASH_NODE_ID_MAGIC 0xA5A55A5AU
+
+#define CAN_ID_1ST_TX        0x101U  /* 1번 보드 → 전체: 약통 정보 브로드캐스트 */
+#define CAN_MSG_CONTAINER    0x01U   /* data[0] 메시지 타입 식별자 */
+#define CAN_COLOR_RED        'R'     /* 빨간 약통 (정상) */
+#define CAN_COLOR_BLUE       'B'     /* 파란 약통 (정상) */
+#define CAN_COLOR_NG         'N'     /* 불량 */
 /* USER CODE END EC */
 
 /* Exported macro ------------------------------------------------------------*/

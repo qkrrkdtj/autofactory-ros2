@@ -79,7 +79,11 @@ const osThreadAttr_t defaultTask_attributes = {
 /* USER CODE BEGIN PV */
 MCP2515_HandleTypeDef hmcp2515;
 
-// 시스템 1 제어 상태 플래그
+osMutexId_t        canMutex;            /* MCP2515 SPI 동시 접근 방지 */
+osSemaphoreId_t    sem_can_rx;          /* MCP2515 INT 핀 낙하 → CANPingTask 즉시 기상 */
+osMessageQueueId_t sys1Queue;           /* 공정1(뚜껑): CAN 수신 → PB8 처리 대기 (최대 8) */
+osMessageQueueId_t sys2Queue;           /* 공정2(액추에이터2): 공정1 완료 → PB2 처리 대기 (최대 8) */
+
 uint8_t cap_sequence_done = 0;
 /* USER CODE END PV */
 
@@ -101,6 +105,38 @@ int __io_putchar(int ch)
 {
   HAL_UART_Transmit(&huart2, (uint8_t *)&ch, 1, HAL_MAX_DELAY);
   return ch;
+}
+
+/* 서보2 현재 펄스폭(us) - 램핑 이동의 시작점으로 사용 */
+static uint16_t g_servo2_pulse = 2300U;
+
+/* 서보2를 target까지 step(us)씩 끊어 보내며 천천히 이동시킨다.
+ * step을 작게 / step_delay_ms를 크게 할수록 더 느리고 부드럽게 움직인다. */
+static void Servo2_MoveRamp(uint16_t target, uint16_t step, uint16_t step_delay_ms)
+{
+  int32_t cur = (int32_t)g_servo2_pulse;
+  int32_t tgt = (int32_t)target;
+  int32_t st  = (step == 0U) ? 1 : (int32_t)step;
+
+  if (cur < tgt)
+  {
+    for (int32_t p = cur + st; p < tgt; p += st)
+    {
+      SET_SERVO2_PULSE((uint16_t)p);
+      osDelay(step_delay_ms);
+    }
+  }
+  else
+  {
+    for (int32_t p = cur - st; p > tgt; p -= st)
+    {
+      SET_SERVO2_PULSE((uint16_t)p);
+      osDelay(step_delay_ms);
+    }
+  }
+
+  SET_SERVO2_PULSE(target);
+  g_servo2_pulse = target;
 }
 /* USER CODE END 0 */
 
@@ -148,7 +184,7 @@ int main(void)
   PRESS_ACT_STOP();
 
   // 시스템 2 초기 하드웨어 상태 빌드
-  RELAY_ON();
+  RELAY_OFF();
   ACT2_STOP();
 
   // MCP2515 CAN 컨트롤러 인터페이스 구성
@@ -173,11 +209,17 @@ int main(void)
   osKernelInitialize();
 
   /* USER CODE BEGIN RTOS_MUTEX */
-  /* add mutexes, ... */
+  canMutex = osMutexNew(NULL);
+  if (canMutex == NULL) Error_Handler();
   /* USER CODE END RTOS_MUTEX */
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
-  /* add semaphores, ... */
+  sem_can_rx = osSemaphoreNew(2U, 0U, NULL);
+  if (sem_can_rx == NULL) Error_Handler();
+
+  __HAL_GPIO_EXTI_CLEAR_IT(MCP2515_INT_Pin);
+  HAL_NVIC_SetPriority(EXTI0_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(EXTI0_IRQn);
   /* USER CODE END RTOS_SEMAPHORES */
 
   /* USER CODE BEGIN RTOS_TIMERS */
@@ -185,7 +227,9 @@ int main(void)
   /* USER CODE END RTOS_TIMERS */
 
   /* USER CODE BEGIN RTOS_QUEUES */
-  /* add queues, ... */
+  sys1Queue = osMessageQueueNew(8U, sizeof(ContainerInfo), NULL);
+  sys2Queue = osMessageQueueNew(8U, sizeof(ContainerInfo), NULL);
+  if (sys1Queue == NULL || sys2Queue == NULL) Error_Handler();
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
@@ -420,7 +464,7 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0|GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_5, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0|GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_4, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);
@@ -434,8 +478,8 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PC0 PC2 PC3 PC5 */
-  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_5;
+  /*Configure GPIO pins : PC0 PC2 PC3 PC4 */
+  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_4;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -448,8 +492,14 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PB0 PB1 PB2 */
-  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2;
+  /*Configure GPIO pin : PB0 */
+  GPIO_InitStruct.Pin = GPIO_PIN_0;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : PB1 PB2 PB8 */
+  GPIO_InitStruct.Pin = GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_8;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
@@ -461,11 +511,9 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : PB8 */
-  GPIO_InitStruct.Pin = GPIO_PIN_8;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI0_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(EXTI0_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
@@ -473,6 +521,12 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+  if (GPIO_Pin == MCP2515_INT_Pin)
+    osSemaphoreRelease(sem_can_rx);
+}
+
 static void CANPingTask(void *argument)
 {
   (void)argument;
@@ -481,6 +535,8 @@ static void CANPingTask(void *argument)
 
   for (;;)
   {
+    osSemaphoreAcquire(sem_can_rx, 100U);  /* INT 낙하 즉시 기상, 100ms 타임아웃 폴백 */
+
     uint32_t now = osKernelGetTickCount();
 
     if ((now - last_tx) >= 1000U)
@@ -494,30 +550,57 @@ static void CANPingTask(void *argument)
         .data     = {0x03U, tx_counter},
         .extended = false,
       };
-      HAL_StatusTypeDef s = MCP2515_Send(&hmcp2515, &tx);
-      if (s != HAL_OK)
-        MCP2515_PrintDiag(&hmcp2515);
+      osMutexAcquire(canMutex, osWaitForever);
+      (void)MCP2515_Send(&hmcp2515, &tx);
+      osMutexRelease(canMutex);
     }
 
     MCP2515_CanMsg rx = {0};
-    if (MCP2515_Receive(&hmcp2515, &rx, 5U) == HAL_OK)
+    osMutexAcquire(canMutex, osWaitForever);
+    HAL_StatusTypeDef rx_st = MCP2515_Receive(&hmcp2515, &rx, 1U);
+    osMutexRelease(canMutex);
+    if (rx_st == HAL_OK)
     {
-      printf("[RX CAN] ID=0x%03lX dlc=%u\r\n", (unsigned long)rx.id, rx.dlc);
+      if (rx.id == CAN_ID_1ST_TX && rx.dlc >= 3U && rx.data[0] == CAN_MSG_CONTAINER)
+      {
+        ContainerInfo info = { .seq = rx.data[1], .color = (char)rx.data[2] };
+        if (osMessageQueuePut(sys1Queue, &info, 0U, 0U) == osOK)
+        {
+          printf("[Q:sys1Queue] push seq=%u color=%c  [total %lu]\r\n",
+                 info.seq, info.color,
+                 (unsigned long)osMessageQueueGetCount(sys1Queue));
+        }
+        else
+        {
+          printf("[Q:sys1Queue] FULL — dropped seq=%u color=%c\r\n", info.seq, info.color);
+        }
+      }
+      else
+      {
+        printf("[CAN] RX ID=0x%03lX dlc=%u\r\n", (unsigned long)rx.id, rx.dlc);
+      }
     }
-
-    osDelay(50U);
   }
 }
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN Header_StartDefaultTask */
+/* USER CODE END Header_StartDefaultTask */
 void StartDefaultTask(void *argument)
 {
+  /* USER CODE BEGIN 5 */
   (void)argument;
   static GPIO_PinState prev_sensor1_state = GPIO_PIN_SET;
+  static uint8_t sys2_sequence_done = 0U;
 
   for (;;)
   {
+    /* 공정1·2 큐에 미처리 약통이 있으면 벨트 가동 */
+    if (osMessageQueueGetCount(sys1Queue) > 0U || osMessageQueueGetCount(sys2Queue) > 0U)
+      RELAY_ON();
+    else
+      RELAY_OFF();
+
     /* ========================================================================= */
     /* [시스템 1] 뚜껑 공급 + 신규 압착 메커니즘 통합 제어 시퀀스                */
     /* ========================================================================= */
@@ -527,35 +610,43 @@ void StartDefaultTask(void *argument)
 
       if (cap_sequence_done == 0)
       {
-        // 중복 방지를 위해 진입하자마자 플래그 잠금
         cap_sequence_done = 1;
-        printf("[SYS 1] Triggered -> Starting Full Cap & Press Sequence\r\n");
 
+        /* 공정1 큐에서 약통 정보 꺼내기 */
+        ContainerInfo info = { .seq = 0U, .color = '?' };
+        if (osMessageQueueGet(sys1Queue, &info, NULL, 0U) == osOK)
+          printf("[Q:sys1Queue] pop  seq=%u color=%c  [remain %lu]\r\n",
+                 info.seq, info.color,
+                 (unsigned long)osMessageQueueGetCount(sys1Queue));
+        else
+          printf("[SYS 1] No pending bottle in sys1Queue — processing physical bottle\r\n");
+
+        /* 감지 후 1초간 벨트를 더 진행시켜 정위치시킨 뒤 정지 */
+        RELAY_ON();
+        osDelay(1000);
         RELAY_OFF();
 
-        // STEP 1. 서보모터 1번 구동 (대기 2300 -> 역회전 하강 상태 800)
-        SET_SERVO1_PULSE(800);
+        // STEP 1. 약통 색상에 따라 뚜껑 위치 선택 (빨강=780, 그 외=2300)
+        uint16_t cap_pulse = (info.color == 'R') ? 780U : 2300U;
+        printf("[SYS 1] Cap select: color=%c -> servo1 pulse=%u\r\n", info.color, cap_pulse);
+        SET_SERVO1_PULSE(cap_pulse);
         osDelay(2000);
 
-        // STEP 2. 서보모터 1번 미세 보정 위치 복귀 (원복 완료)
-        SET_SERVO1_PULSE(2300);
-        osDelay(2000);
-
-        // STEP 3. 뚜껑 공급용 기계식 액추되이터 전진 (9초)
+        // STEP 2. 선택된 위치에서 뚜껑 공급용 기계식 액추에이터 전진 (9초)
         NEW_ACT_FORWARD();
         osDelay(9000);
 
         NEW_ACT_STOP();
         osDelay(300);
 
-        // STEP 4. 뚜껑 공급용 기계식 액추에이터 후진 복귀 (9.5초)
+        // STEP 3. 뚜껑 공급용 기계식 액추에이터 후진 복귀 (9.5초)
         NEW_ACT_BACKWARD();
         osDelay(9500);
 
         NEW_ACT_STOP();
         osDelay(500);
 
-        // STEP 5. 신규 압착 액추에이터 전진 구동 (위에서 꾹 누르기 - 9초)
+        // STEP 4. 신규 압착 액추에이터 전진 구동 (위에서 꾹 누르기 - 9초)
         printf("[SYS 1] Pressing Mechanism Active...\r\n");
         PRESS_ACT_FORWARD();
         osDelay(9000);
@@ -563,7 +654,7 @@ void StartDefaultTask(void *argument)
         PRESS_ACT_STOP();
         osDelay(300);
 
-        // STEP 6. 신규 압착 액추에이터 복귀 후진 구동 (9초)
+        // STEP 5. 신규 압착 액추에이터 복귀 후진 구동 (9초)
         PRESS_ACT_BACKWARD();
         osDelay(9000);
 
@@ -571,21 +662,26 @@ void StartDefaultTask(void *argument)
         osDelay(200);
         printf("[SYS 1] Pressing Mechanism Completed.\r\n");
 
-        // STEP 7. 서보모터 2번 꺾기 구동 (대기 1000 -> 회전 1500)
-        SET_SERVO2_PULSE(1000);
+        // STEP 6. 서보모터 2번 꺾기 구동 (대기 2300 -> 꺾기 1000), 느리게 램핑 이동
+        Servo2_MoveRamp(1000, 10U, 20U);
         osDelay(2000);
 
-        // STEP 8. 전체 서보축 최종 안전 대기 홈(Home) 위치 초기화 복귀 (원복 완료)
+        // STEP 7. 전체 서보축 최종 안전 대기 홈(Home) 위치 초기화 복귀 (원복 완료)
         SET_SERVO1_PULSE(2300);
         osDelay(2000);
-        SET_SERVO2_PULSE(2300);
+        Servo2_MoveRamp(2300, 10U, 20U);
         osDelay(1000);
 
-        RELAY_ON();
+        if (osMessageQueuePut(sys2Queue, &info, 0U, 0U) == osOK)
+          printf("[Q:sys2Queue] push seq=%u color=%c  [total %lu]\r\n",
+                 info.seq, info.color,
+                 (unsigned long)osMessageQueueGetCount(sys2Queue));
+        else
+          printf("[Q:sys2Queue] FULL — dropped seq=%u color=%c\r\n", info.seq, info.color);
+
         printf("[SYS 1] Sequence Completed Successfully.\r\n");
       }
 
-      // 시스템 2가 스케줄링될 수 있도록 대기 처리
       osDelay(50);
     }
     else
@@ -595,7 +691,7 @@ void StartDefaultTask(void *argument)
       if (prev_sensor1_state != GPIO_PIN_SET)
       {
         SET_SERVO1_PULSE(2300);
-        SET_SERVO2_PULSE(2300);
+        Servo2_MoveRamp(2300, 10U, 20U);
         NEW_ACT_STOP();
         PRESS_ACT_STOP();
         printf("[SYS 1] Sensor Cleared -> System Standby\r\n");
@@ -604,44 +700,55 @@ void StartDefaultTask(void *argument)
     }
     prev_sensor1_state = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_8);
 
-
     /* ========================================================================= */
-    /* [기존 유지] 시츄에이션 2: 기존 액추에이터 2번 및 릴레이 제어              */
+    /* [시스템 2] 액추에이터 2번 및 릴레이 제어                                  */
     /* ========================================================================= */
     if (SENSOR2_DETECTED())
     {
-      printf("[SEQ 2] Sensor 2 Active! -> Relay OFF, Actuator 2 Moving.\r\n");
-
-      RELAY_OFF();
-      osDelay(50);
-
-      ACT2_FORWARD();
-      osDelay(10000);
-
-      ACT2_STOP();
-      osDelay(300);
-
-      ACT2_BACKWARD();
-      osDelay(13000);
-
-      ACT2_STOP();
-      osDelay(50);
-
-      RELAY_ON();
-      printf("[SEQ 2] Actuator 2 Completed! -> Relay ON.\r\n");
-      osDelay(500);
-
-      while (SENSOR2_DETECTED())
+      if (sys2_sequence_done == 0U)
       {
-        osDelay(100);
+        sys2_sequence_done = 1U;
+
+        ContainerInfo info = { .seq = 0U, .color = '?' };
+        if (osMessageQueueGet(sys2Queue, &info, NULL, 0U) == osOK)
+          printf("[Q:sys2Queue] pop  seq=%u color=%c  [remain %lu]\r\n",
+                 info.seq, info.color,
+                 (unsigned long)osMessageQueueGetCount(sys2Queue));
+        else
+          printf("[SYS 2] No pending bottle in sys2Queue — processing physical bottle\r\n");
+
+        printf("[SEQ 2] Sensor 2 Active! -> Relay OFF, Actuator 2 Moving.\r\n");
+
+        RELAY_OFF();
+        osDelay(50);
+
+        ACT2_FORWARD();
+        osDelay(10000);
+
+        ACT2_STOP();
+        osDelay(300);
+
+        ACT2_BACKWARD();
+        osDelay(13000);
+
+        ACT2_STOP();
+        osDelay(50);
+
+        printf("[SEQ 2] Actuator 2 Completed!\r\n");
+        osDelay(500);
       }
+
+      osDelay(50);
+    }
+    else
+    {
+      sys2_sequence_done = 0U;
     }
 
     osDelay(20);
   }
+  /* USER CODE END 5 */
 }
-/* USER CODE END Header_StartDefaultTask */
-
 
 /**
   * @brief  Period elapsed callback in non blocking mode
