@@ -71,6 +71,33 @@
     .dot.waiting { background: var(--amber); }
     .dot.ready { background: var(--green); }
     .dot.off { background: var(--border); }
+
+    /* ─── 배터리 바 ─── */
+    .battery-wrap { height: 5px; background: var(--border); border-radius: 3px; margin-top: 10px; overflow: hidden; }
+    .battery-bar  { height: 100%; width: 100%; background: var(--green); border-radius: 3px; transition: width 0.5s, background 0.3s; }
+    .battery-text { font-size: 11px; color: var(--text-faint); margin-top: 4px; display: flex; align-items: center; gap: 4px; }
+    .battery-text i { font-size: 13px; }
+
+    /* ─── 배터리 경고 토스트 ─── */
+    #battery-alert {
+      display: none;
+      position: fixed;
+      top: 24px; right: 24px;
+      background: var(--red-bg);
+      border: 1px solid var(--red-border);
+      color: var(--red);
+      border-radius: var(--radius);
+      padding: 14px 20px;
+      font-size: 14px; font-weight: 600;
+      z-index: 999;
+      display: none;
+      align-items: center;
+      gap: 8px;
+      animation: fadein 0.3s;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.4);
+    }
+    #battery-alert.show { display: flex; }
+    @keyframes fadein { from { opacity:0; transform:translateY(-10px); } to { opacity:1; transform:translateY(0); } }
     
     .metric-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
     .metric-card { background: var(--surface2); border-radius: var(--radius-sm); padding: 12px 14px; }
@@ -85,7 +112,7 @@
     .btn-stop  { background: var(--red-bg);   color: var(--red);   border-color: var(--red-border); }
     .btn-signal { background: var(--amber-bg); color: var(--amber); border-color: var(--amber-border); padding: 11px; }
     
-    .log-box { background: #0d1626; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 12px; min-height: 120px; max-height: 250px; overflow-y: auto; display: flex; flex-direction: column; gap: 3px; font-family: 'Consolas', 'Monaco', monospace; }
+    .log-box { background: #0d1626; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 12px; height: 150px; flex-shrink: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 3px; font-family: 'Consolas', 'Monaco', monospace; }
     .log-entry { font-size: 12px; display: flex; gap: 10px; line-height: 1.5; }
     .log-ts { color: var(--text-faint); flex-shrink: 0; }
     .log-msg.info    { color: var(--blue); }
@@ -106,22 +133,18 @@
       height: 100%;
       width: auto;
       max-width: 100%;
-      /* 세로로 회전: 원본(69x48)을 90도 돌린 비율(48x69) */
       aspect-ratio: 48 / 69;
       background-color: #000;
-      /* 맵 이미지는 canvas에서 직접 그려 회전시키므로 background-image 제거 */
       border: 1px solid var(--border);
       border-radius: var(--radius-sm);
       overflow: hidden;
-      image-rendering: pixelated; /* 작은 맵 이미지를 선명하게 렌더링 */
+      image-rendering: pixelated;
     }
     #mapCanvas {
       position: absolute;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
-      image-rendering: pixelated; /* 캔버스 그림자 선명도 유지 */
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      image-rendering: pixelated;
     }
     .legend {
       display: flex; gap: 20px; justify-content: center; margin-top: 10px; font-size: 13px; font-weight: 600;
@@ -129,6 +152,12 @@
   </style>
 </head>
 <body>
+
+  <!-- 배터리 경고 토스트 -->
+  <div id="battery-alert">
+    <i class="ti ti-battery-exclamation" style="font-size:18px;"></i>
+    <span id="alert-msg">배터리 부족!</span>
+  </div>
 
   <div class="layout-wrapper">
     <div class="left-col">
@@ -153,8 +182,10 @@
             </div>
             <div class="robot-status">
               <span class="dot waiting" id="dot-1"></span>
-              <span id="rstatus-1">keepout 대기 중</span>
+              <span id="rstatus-1">구동 대기 중</span>
             </div>
+            <div class="battery-wrap"><div class="battery-bar" id="bat-bar-1"></div></div>
+            <div class="battery-text" id="bat-text-1"><i class="ti ti-battery-2"></i> --%</div>
           </div>
           <div class="robot-card selected" id="card-2" onclick="toggleRobot(2)">
             <div class="robot-card-top">
@@ -163,8 +194,10 @@
             </div>
             <div class="robot-status">
               <span class="dot waiting" id="dot-2"></span>
-              <span id="rstatus-2">keepout 대기 중</span>
+              <span id="rstatus-2">구동 대기 중</span>
             </div>
+            <div class="battery-wrap"><div class="battery-bar" id="bat-bar-2"></div></div>
+            <div class="battery-text" id="bat-text-2"><i class="ti ti-battery-2"></i> --%</div>
           </div>
         </div>
       </div>
@@ -178,7 +211,7 @@
           </div>
           <div class="metric-card">
             <div class="metric-val" id="m-ready">0 / 0</div>
-            <div class="metric-lbl">keepout 준비</div>
+            <div class="metric-lbl">준비 완료</div>
           </div>
           <div class="metric-card">
             <div class="metric-val" id="m-mission">대기</div>
@@ -215,7 +248,9 @@
         <div class="panel-label">시스템 로그</div>
         <div class="log-box" id="log-box"></div>
       </div>
-    </div> <div class="right-col">
+    </div>
+
+    <div class="right-col">
       <div class="panel" style="height: 100%;">
         <div class="panel-label">실시간 위치 모니터링</div>
         
@@ -230,7 +265,10 @@
           <div style="color: #f87171;"><i class="ti ti-circle-filled"></i> Waffle 2</div>
         </div>
       </div>
-    </div> </div> <script>
+    </div>
+  </div>
+
+<script>
   // ==========================================
   // 기존 컨트롤러 스크립트
   // ==========================================
@@ -301,10 +339,10 @@
       card.classList.add('selected');
       if (state.keepout[i]) {
         dot.className = 'dot ready';
-        statusEl.textContent = 'keepout 준비 완료';
+        statusEl.textContent = '준비 완료';
       } else {
         dot.className = 'dot waiting';
-        statusEl.textContent = 'keepout 대기 중';
+        statusEl.textContent = '구동 대기 중';
       }
       addLog(`Waffle ${idx} 활성화됨`, 'info');
     } else {
@@ -322,8 +360,8 @@
     state.keepout[i] = true;
     if (state.selected[i]) {
       document.getElementById(`dot-${idx}`).className = 'dot ready';
-      document.getElementById(`rstatus-${idx}`).textContent = 'keepout 준비 완료';
-      addLog(`Waffle ${idx} keepout 필터 확인됨`, 'success');
+      document.getElementById(`rstatus-${idx}`).textContent = '준비 완료';
+      addLog(`Waffle ${idx} 구동 준비 완료`, 'success');
     }
     updateUI();
   }
@@ -392,8 +430,64 @@
     };
   }
 
-  addLog('시스템 초기화 완료. keepout 필터 대기 중.', 'info');
+  addLog('시스템 초기화 완료. 로봇 구동 대기 중', 'info');
   updateUI();
+
+  // ==========================================
+  // 배터리 스트림
+  // ==========================================
+  const batteryAlertedIds = new Set(); // 이미 경고 로그 띄운 로봇 추적
+
+  const batterySource = new EventSource('/battery_stream');
+  batterySource.onmessage = function(e) {
+    try {
+      const data = JSON.parse(e.data);
+      const alerts = [];
+
+      [1, 2].forEach(id => {
+        if (data[id] === undefined) return;
+        const pct = Math.min(100, Math.max(0, data[id]));
+        const bar  = document.getElementById(`bat-bar-${id}`);
+        const text = document.getElementById(`bat-text-${id}`);
+        if (!bar) return;
+
+        bar.style.width = pct + '%';
+
+        // 색상: 10% 이하 빨강, 30% 이하 주황, 그 외 초록
+        let icon, color;
+        if (pct <= 10) {
+          color = 'var(--red)';   icon = 'ti-battery-1';
+        } else if (pct <= 30) {
+          color = 'var(--amber)'; icon = 'ti-battery-2';
+        } else {
+          color = 'var(--green)'; icon = 'ti-battery-3';
+        }
+        bar.style.background = color;
+        text.innerHTML = `<i class="ti ${icon}" style="color:${color}"></i> ${pct.toFixed(1)}%`;
+
+        // 10% 이하면 경고 목록에 추가
+        if (pct <= 10) {
+          alerts.push(`Waffle ${id} ${pct.toFixed(1)}%`);
+          // 로그는 처음 한 번만
+          if (!batteryAlertedIds.has(id)) {
+            batteryAlertedIds.add(id);
+            addLog(`⚠ Waffle ${id} 배터리 부족! (${pct.toFixed(1)}%)`, 'error');
+          }
+        } else {
+          batteryAlertedIds.delete(id); // 충전되면 다시 경고 가능하게
+        }
+      });
+
+      // 토스트 경고
+      const alertEl = document.getElementById('battery-alert');
+      if (alerts.length > 0) {
+        document.getElementById('alert-msg').textContent = '배터리 부족! ' + alerts.join(' / ');
+        alertEl.classList.add('show');
+      } else {
+        alertEl.classList.remove('show');
+      }
+    } catch(err) { console.error('배터리 파싱 에러:', err); }
+  };
 
   // ==========================================
   // 실시간 맵 렌더링 (Canvas) 스크립트
@@ -402,116 +496,83 @@
   const canvas = document.getElementById('mapCanvas');
   const ctx = canvas.getContext('2d');
 
-  // 원본 맵(map_test.pgm) 픽셀 크기
   const MAP_W = 69;
   const MAP_H = 48;
-
-  // 캔버스 내부 해상도 배율 (마커를 작고 선명하게 그리기 위함)
   const SCALE = 8;
 
-  // 90도 회전 + 배율 적용한 캔버스 크기
-  canvas.width = MAP_H * SCALE;   // 48 * 8 = 384
-  canvas.height = MAP_W * SCALE;  // 69 * 8 = 552
-  ctx.imageSmoothingEnabled = false; // 맵 이미지 픽셀 선명도 유지
+  canvas.width = MAP_H * SCALE;
+  canvas.height = MAP_W * SCALE;
+  ctx.imageSmoothingEnabled = false;
 
-  // map_test.yaml 좌표 매핑 값
   const MAP_RESOLUTION = 0.050;
   const MAP_ORIGIN_X = -1.950;
   const MAP_ORIGIN_Y = -1.182;
 
-  // 맵 이미지를 canvas에 직접 그리기 위해 로드
   const mapImg = new Image();
   let mapLoaded = false;
   let lastPoses = {};
   mapImg.onload = () => { mapLoaded = true; render(lastPoses); };
   mapImg.src = '/static/map.png';
 
-  // ROS 좌표 -> (회전 전) 배율 적용된 맵 캔버스 좌표
   function rosToCanvas(x, y) {
       const px = (x - MAP_ORIGIN_X) / MAP_RESOLUTION;
       const py = (y - MAP_ORIGIN_Y) / MAP_RESOLUTION;
-      // ROS Y축은 위로 증가, Canvas Y축은 아래로 증가하므로 뒤집음
       return { x: px * SCALE, y: (MAP_H - py) * SCALE };
   }
 
-  // 맵과 점을 함께 90도 회전시키는 변환
-  // (시계방향 90도. 반대로 돌리려면 아래 두 줄을
-  //  ctx.translate(0, canvas.height); ctx.rotate(-Math.PI / 2); 로 교체)
   function applyRotation() {
       ctx.translate(canvas.width, 0);
       ctx.rotate(Math.PI / 2);
   }
 
-  // 원본 맵 좌표 -> 회전이 적용된 최종 캔버스 좌표로 수동 변환
-  // (applyRotation: translate(width,0) 후 90도 회전과 동일)
   function rotatePoint(p) {
       return { x: canvas.width - p.y, y: p.x };
   }
 
-  // 십자 마커 (방향 정보가 없을 때 사용)
   function drawCross(cx, cy, color) {
-      cx = Math.round(cx);
-      cy = Math.round(cy);
+      cx = Math.round(cx); cy = Math.round(cy);
       ctx.fillStyle = color;
-      ctx.fillRect(cx - 9, cy - 1, 18, 3); // 가로 막대
-      ctx.fillRect(cx - 1, cy - 9, 3, 18); // 세로 막대
+      ctx.fillRect(cx - 9, cy - 1, 18, 3);
+      ctx.fillRect(cx - 1, cy - 9, 3, 18);
   }
 
-  // 방향 화살표 마커 (yaw가 있을 때 사용)
-  // theta(ROS yaw)는 맵을 90도 돌린 것에 맞춰 화면 방향벡터로 변환됨.
-  // 방향이 반대/90도 틀어져 보이면 아래 dx, dy 식을 조정하면 됨:
-  //   현재: dx=sin(theta), dy=cos(theta)
-  //   반대로: dx=-sin(theta), dy=-cos(theta)  /  좌우반전: dx=-sin, dy=cos 등
   function drawArrow(cx, cy, theta, color) {
-      const dx = Math.sin(theta);   // 화면상 진행방향 x
-      const dy = Math.cos(theta);   // 화면상 진행방향 y
-      const px = -dy, py = dx;      // 진행방향에 수직인 벡터
-      const front = 11;            // 앞쪽(코) 길이
-      const back  = 7;             // 뒤쪽 길이
-      const half  = 7;             // 뒤쪽 폭의 절반
+      const dx = Math.sin(theta);
+      const dy = Math.cos(theta);
+      const px = -dy, py = dx;
+      const front = 11, back = 7, half = 7;
       ctx.fillStyle = color;
       ctx.beginPath();
-      ctx.moveTo(cx + dx * front,             cy + dy * front);
-      ctx.lineTo(cx - dx * back + px * half,  cy - dy * back + py * half);
-      ctx.lineTo(cx - dx * back - px * half,  cy - dy * back - py * half);
+      ctx.moveTo(cx + dx * front,            cy + dy * front);
+      ctx.lineTo(cx - dx * back + px * half, cy - dy * back + py * half);
+      ctx.lineTo(cx - dx * back - px * half, cy - dy * back - py * half);
       ctx.closePath();
       ctx.fill();
   }
 
   function drawMarker(cx, cy, theta, color) {
-      if (typeof theta === 'number') {
-          drawArrow(cx, cy, theta, color);
-      } else {
-          drawCross(cx, cy, color);
-      }
+      if (typeof theta === 'number') drawArrow(cx, cy, theta, color);
+      else drawCross(cx, cy, color);
   }
 
   function render(poses) {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-      // 1) 맵 이미지: 회전 변환 안에서 그림
       ctx.save();
       applyRotation();
       if (mapLoaded) ctx.drawImage(mapImg, 0, 0, MAP_W * SCALE, MAP_H * SCALE);
       ctx.restore();
 
-      // 2) 로봇 마커: 회전된 좌표를 직접 계산해 변환 없이 그림 (픽셀 선명)
-      // 로봇 1 (Waffle 1 - 파란색)
       if (poses[1] && typeof poses[1].x === 'number') {
           const p1 = rotatePoint(rosToCanvas(poses[1].x, poses[1].y));
           drawMarker(p1.x, p1.y, poses[1].theta, '#38bdf8');
       }
-
-      // 로봇 2 (Waffle 2 - 빨간색)
       if (poses[2] && typeof poses[2].x === 'number') {
           const p2 = rotatePoint(rosToCanvas(poses[2].x, poses[2].y));
           drawMarker(p2.x, p2.y, poses[2].theta, '#f87171');
       }
   }
 
-  // '/pose_stream' 엔드포인트 연결
   const poseSource = new EventSource('/pose_stream');
-
   poseSource.onmessage = function(event) {
       try {
           lastPoses = JSON.parse(event.data);
