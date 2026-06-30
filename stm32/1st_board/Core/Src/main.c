@@ -35,12 +35,9 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define CAN_ID_1ST_TX     0x101U
-#define CAN_MSG_CONTAINER 0x01U
-
-/* 신규 추가: PA3 시작 적외선 센서 정의 */
+/* PA9 시작 적외선 센서 */
 #define START_SENSOR_GPIO_Port GPIOA
-#define START_SENSOR_Pin       GPIO_PIN_3
+#define START_SENSOR_Pin       GPIO_PIN_9
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -72,8 +69,9 @@ osSemaphoreId_t sem_can_int;  /* MCP2515 INT 핀 낙하 → CanRxTask 즉시 기
 
 volatile bool g_belt_ext_stop = false;  /* 2번 보드 벨트 정지 요청 플래그 */
 
-static volatile bool g_sensor_monitoring = false;
-static volatile bool g_sensor_triggered  = false;
+static volatile bool     g_sensor_monitoring = false;
+static volatile bool     g_sensor_triggered  = false;
+static volatile uint32_t g_exti1_count       = 0U;  /* EXTI1 발화 횟수 (진단용) */
 
 static uint8_t  g_pi_rsp_log[PI_RSP_LOG_SIZE];
 static uint16_t g_pi_rsp_count = 0U;
@@ -90,12 +88,15 @@ void StartDefaultTask(void *argument);
 static void BeltTask(void *argument);
 static void DisplayTask(void *argument);
 static void CanRxTask(void *argument);
+static void Belt_SetRelay(bool on);
 static void SensorMonitoring_Enable(void);
 static void SensorMonitoring_Disable(void);
 static bool Sensor_ConfirmDetected(void);
 static void BeltStatus_Update(uint8_t stage, bool belt_on);
 static void PiUart_FlushRx(void);
 static void HandleObstacleDetected(void);
+static bool VisionColor_IsValid(uint8_t color);
+static bool VisionColor_IsOk(uint8_t color);
 
 /* 신규 추가: 시작 센서 상태 읽기 함수 프로토타입 */
 static bool ReadStartSensor(void);
@@ -115,7 +116,7 @@ bool ReadSensor(void)
   return (HAL_GPIO_ReadPin(SENSOR_GPIO_Port, SENSOR_Pin) == GPIO_PIN_RESET);
 }
 
-/* 신규 추가: PA5 시작 센서 상태 읽기 (물체 감지 시 true 반환) */
+/* PA9 시작 센서 상태 읽기 (물체 감지 시 true 반환) */
 static bool ReadStartSensor(void)
 {
   return (HAL_GPIO_ReadPin(START_SENSOR_GPIO_Port, START_SENSOR_Pin) == GPIO_PIN_RESET);
@@ -159,7 +160,12 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
     return;
   }
 
-  if (GPIO_Pin != SENSOR_Pin || !g_sensor_monitoring)
+  if (GPIO_Pin != SENSOR_Pin)
+    return;
+
+  g_exti1_count++;  /* ISR 발화 횟수 카운트 (g_sensor_monitoring 조건 전) */
+
+  if (!g_sensor_monitoring)
     return;
   if (HAL_GPIO_ReadPin(SENSOR_GPIO_Port, SENSOR_Pin) != GPIO_PIN_RESET)
     return;
@@ -191,24 +197,39 @@ static void PiUart_FlushRx(void)
   while (HAL_UART_Receive(&huart2, &dummy, 1U, 1U) == HAL_OK) {}
 }
 
+/* Returns true for R/B/N vision response bytes. */
+static bool VisionColor_IsValid(uint8_t color)
+{
+  return (color == CAN_COLOR_RED || color == CAN_COLOR_BLUE || color == CAN_COLOR_NG);
+}
+
+/* Returns true when the bottle passed vision inspection (red or blue). */
+static bool VisionColor_IsOk(uint8_t color)
+{
+  return (color == CAN_COLOR_RED || color == CAN_COLOR_BLUE);
+}
+
 /* Send 'S' to Raspberry Pi immediately, receive one-byte inference result. */
 static void HandleObstacleDetected(void)
 {
-  uint8_t tx_byte = UART_CMD_START;
-  uint8_t rx_byte = UART_RSP_NG;
+  uint8_t tx_byte   = UART_CMD_START;
+  uint8_t rx_byte   = CAN_COLOR_NG;
+  uint8_t can_color = CAN_COLOR_NG;
 
   HAL_StatusTypeDef rx_status;
   osDelay(500U);  /* 벨트 정지 후 카메라 안정화 대기 */
   PiUart_FlushRx();
+
   HAL_UART_Transmit(&huart2, &tx_byte, 1U, HAL_MAX_DELAY);
   rx_status = HAL_UART_Receive(&huart2, &rx_byte, 1U, UART_RX_TIMEOUT_MS);
 
-  if (rx_status != HAL_OK ||
-      (rx_byte != UART_RSP_RED && rx_byte != UART_RSP_BLUE && rx_byte != UART_RSP_NG))
-    rx_byte = UART_RSP_NG;
+  if (rx_status != HAL_OK || !VisionColor_IsValid(rx_byte))
+    can_color = CAN_COLOR_NG;
+  else
+    can_color = rx_byte;
 
   osMutexAcquire(piRspMutex, osWaitForever);
-  g_pi_rsp_log[g_pi_rsp_count % PI_RSP_LOG_SIZE] = rx_byte;
+  g_pi_rsp_log[g_pi_rsp_count % PI_RSP_LOG_SIZE] = can_color;
   g_pi_rsp_count++;
   osMutexRelease(piRspMutex);
 
@@ -219,18 +240,26 @@ static void HandleObstacleDetected(void)
   MCP2515_CanMsg can_tx = {
     .id       = CAN_ID_1ST_TX,
     .dlc      = 3U,
-    .data     = {CAN_MSG_CONTAINER, s_can_seq, rx_byte},
+    .data     = {CAN_MSG_CONTAINER, s_can_seq, can_color},
     .extended = false,
   };
   osMutexAcquire(canMutex, osWaitForever);
-  MCP2515_Send(&hmcp2515, &can_tx);
+  (void)MCP2515_Send(&hmcp2515, &can_tx);
   osMutexRelease(canMutex);
 }
 
 /* Belt state machine.
-   IDLE    : PA5 적외선 감지 센서 확인 -> 감지 시 1초 대기 -> FORWARD 전이
+   IDLE    : PA9 적외선 감지 센서 확인 -> 감지 시 1초 대기 -> FORWARD 전이
    FORWARD : holds actuator1 forward for 8s, then transitions to RUNNING.
    RUNNING : actuator1 backward, belt ON, sensor monitoring active. */
+/* 릴레이를 켜거나 끌 때 g_belt_ext_stop을 확인해 외부 정지 요청을 항상 존중한다. */
+static void Belt_SetRelay(bool on)
+{
+  if (on && g_belt_ext_stop)
+    return;  /* 외부 정지 요청 중에는 켜지 않음 */
+  HAL_GPIO_WritePin(RELAY_GPIO_Port, RELAY_Pin, on ? GPIO_PIN_SET : GPIO_PIN_RESET);
+}
+
 static void BeltTask(void *argument)
 {
   (void)argument;
@@ -241,65 +270,74 @@ static void BeltTask(void *argument)
   uint32_t stage_start_tick = osKernelGetTickCount();
   bool     sensor_active    = false;
 
+  /* 부팅 시 벨트 ON */
+  Belt_SetRelay(true);
+
   for (;;)
   {
     uint32_t current_tick = osKernelGetTickCount();
+
+    /* 비전 감지 처리 (FORWARD/RUNNING 공통): 무장 상태에서 감지되면 정지·검사 후 IDLE 복귀 */
+    if (sensor_active && g_sensor_triggered)
+    {
+      if (Sensor_ConfirmDetected())
+      {
+        /* 비전 구역 도달 — 벨트 즉시 정지 (ISR이 이미 껐지만 명시적으로 재확인) */
+        HAL_GPIO_WritePin(RELAY_GPIO_Port, RELAY_Pin, GPIO_PIN_RESET);
+        SensorMonitoring_Disable();  /* g_sensor_triggered = false */
+        sensor_active = false;
+
+        HandleObstacleDetected();
+
+        /* 약통을 다음 공정으로 이동: 0.5초 가동 후 IDLE 복귀 */
+        Belt_SetRelay(true);
+        osDelay(500U);
+        Belt_SetRelay(false);
+
+        current_stage = MACHINE_STAGE_IDLE;
+
+        /* IDLE 진입 후 벨트 재가동 */
+        Belt_SetRelay(true);
+      }
+      else
+      {
+        g_sensor_triggered = false;
+        SensorMonitoring_Enable();
+      }
+    }
 
     switch (current_stage)
     {
       case MACHINE_STAGE_IDLE:
         SensorMonitoring_Disable();
 
-        /* 1. 신규 PA5 적외선 센서 감지 상태 확인 */
+        /* PA9 적외선 센서 감지 상태 확인 */
         if (ReadStartSensor() == true)
         {
           /* 채터링 노이즈 방지를 위해 20ms 후 재확인 */
           osDelay(20U);
           if (ReadStartSensor() == true)
           {
-            /* 2. 감지 후 1초(1000ms) 지연 대기 */
             osDelay(1000U);
 
-            /* 3. 공정 구동(FORWARD 단계)으로 전이 */
+            /* 액추에이터 전진과 동시에 비전 센서 무장 */
             current_stage    = MACHINE_STAGE_FORWARD;
             stage_start_tick = osKernelGetTickCount();
-            sensor_active    = false;
-            printf("[SYSTEM] Start Sensor Triggered! 1s delayed. Starting FORWARD stage.\r\n");
+            sensor_active    = true;
+            SensorMonitoring_Enable();
           }
         }
         break;
 
       case MACHINE_STAGE_FORWARD:
-        SensorMonitoring_Disable();
+        /* 비전 감지는 무장 유지 (FORWARD 진입 시 무장됨). 8초 전진 후 RUNNING 전이 */
         if ((current_tick - stage_start_tick) >= forward_ms)
         {
           current_stage = MACHINE_STAGE_RUNNING;
-          sensor_active = true;
-          SensorMonitoring_Enable();
         }
         break;
 
       case MACHINE_STAGE_RUNNING:
-        if (sensor_active && g_sensor_triggered)
-        {
-          if (Sensor_ConfirmDetected())
-          {
-            SensorMonitoring_Disable();
-            sensor_active = false;
-
-            HandleObstacleDetected();
-
-            sensor_active = true;
-            HAL_GPIO_WritePin(RELAY_GPIO_Port, RELAY_Pin, GPIO_PIN_SET);
-            osDelay(SENSOR_REARM_DELAY_MS);
-            SensorMonitoring_Enable();
-          }
-          else
-          {
-            g_sensor_triggered = false;
-            SensorMonitoring_Enable();
-          }
-        }
         break;
 
       default:
@@ -309,35 +347,25 @@ static void BeltTask(void *argument)
         break;
     }
 
-    bool belt_on = false;
-    switch (current_stage)
+    /* 안전망: 2번 보드 정지 요청 중에는 매 루프 릴레이 강제 OFF 유지 */
+    if (g_belt_ext_stop)
+      HAL_GPIO_WritePin(RELAY_GPIO_Port, RELAY_Pin, GPIO_PIN_RESET);
+
+    /* 액추에이터 방향: FORWARD만 전진, 나머지는 홈 위치 */
+    if (current_stage == MACHINE_STAGE_FORWARD)
     {
-      case MACHINE_STAGE_IDLE:
-        HAL_GPIO_WritePin(RELAY_GPIO_Port,    RELAY_Pin,    GPIO_PIN_RESET);
-        HAL_GPIO_WritePin(ACT1_IN1_GPIO_Port, ACT1_IN1_Pin, GPIO_PIN_RESET);
-        HAL_GPIO_WritePin(ACT1_IN2_GPIO_Port, ACT1_IN2_Pin, GPIO_PIN_SET);
-        break;
-
-      case MACHINE_STAGE_FORWARD:
-        HAL_GPIO_WritePin(RELAY_GPIO_Port,    RELAY_Pin,    GPIO_PIN_RESET);
-        HAL_GPIO_WritePin(ACT1_IN1_GPIO_Port, ACT1_IN1_Pin, GPIO_PIN_SET);
-        HAL_GPIO_WritePin(ACT1_IN2_GPIO_Port, ACT1_IN2_Pin, GPIO_PIN_RESET);
-        break;
-
-      case MACHINE_STAGE_RUNNING:
-        belt_on = sensor_active && !g_belt_ext_stop;
-        HAL_GPIO_WritePin(RELAY_GPIO_Port,    RELAY_Pin,    belt_on ? GPIO_PIN_SET : GPIO_PIN_RESET);
-        HAL_GPIO_WritePin(ACT1_IN1_GPIO_Port, ACT1_IN1_Pin, GPIO_PIN_RESET);
-        HAL_GPIO_WritePin(ACT1_IN2_GPIO_Port, ACT1_IN2_Pin, GPIO_PIN_SET);
-        break;
-
-      default:
-        break;
+      HAL_GPIO_WritePin(ACT1_IN1_GPIO_Port, ACT1_IN1_Pin, GPIO_PIN_SET);
+      HAL_GPIO_WritePin(ACT1_IN2_GPIO_Port, ACT1_IN2_Pin, GPIO_PIN_RESET);
+    }
+    else
+    {
+      HAL_GPIO_WritePin(ACT1_IN1_GPIO_Port, ACT1_IN1_Pin, GPIO_PIN_RESET);
+      HAL_GPIO_WritePin(ACT1_IN2_GPIO_Port, ACT1_IN2_Pin, GPIO_PIN_SET);
     }
 
-    BeltStatus_Update(current_stage, belt_on);
+    BeltStatus_Update(current_stage,
+                      HAL_GPIO_ReadPin(RELAY_GPIO_Port, RELAY_Pin) == GPIO_PIN_SET);
 
-    /* 기존 1U에서 10U로 변경하여 CPU 과점유 방지 (성능 최적화 적용) */
     osDelay(current_stage == MACHINE_STAGE_RUNNING ? 10U : 50U);
   }
 }
@@ -383,27 +411,16 @@ int main(void)
   MX_USART2_UART_Init();
   MX_SPI1_Init();
   /* USER CODE BEGIN 2 */
-  setvbuf(stdout, NULL, _IONBF, 0);
   HAL_Delay(500U);
 
-  /* ── 1단계: UART 동작 확인 ── */
-  printf("\r\n=== 1st Board Start ===\r\n");
-
-  /* ── 2단계: MCP2515 SPI 초기화 확인 ── */
   hmcp2515.hspi    = &hspi1;
   hmcp2515.cs_port = MCP2515_CS_GPIO_Port;
   hmcp2515.cs_pin  = MCP2515_CS_Pin;
   hmcp2515.osc_hz  = MCP2515_OSC_8MHZ;
 
-  if (MCP2515_AutoDetectOsc(&hmcp2515) != HAL_OK)
-  {
-    printf("[CAN] MCP2515 init FAILED — SPI 배선/CS 핀 확인\r\n");
-    MCP2515_PrintDiag(&hmcp2515);
-  }
-  else
+  if (MCP2515_AutoDetectOsc(&hmcp2515) == HAL_OK)
   {
     MCP2515_SetNormalMode(&hmcp2515);
-    printf("[CAN] MCP2515 ready (8 MHz)\r\n");
   }
   /* USER CODE END 2 */
 
@@ -621,39 +638,39 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10|GPIO_PIN_8|GPIO_PIN_9, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10|GPIO_PIN_8|GPIO_PIN_9|GPIO_PIN_14|GPIO_PIN_15, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin : PC13 (B1 버튼은 더이상 사용하지 않으나 하드웨어 초기화 유지) */
+  /*Configure GPIO pin : PC13 */
   GPIO_InitStruct.Pin = GPIO_PIN_13;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : PA4 (MCP2515 CS) */
+  /*Configure GPIO pin : PA4 */
   GPIO_InitStruct.Pin = GPIO_PIN_4;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /* ── 변경 구역: PA5 핀을 시작 센서(입력)로 지정 ── */
-  GPIO_InitStruct.Pin = START_SENSOR_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_PULLUP;     /* 노이즈 유입 방지를 위해 내부 풀업 설정 */
-  HAL_GPIO_Init(START_SENSOR_GPIO_Port, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : PB0 PB1 (기존 인터럽트 핀들) */
+  /*Configure GPIO pins : PB0 PB1 */
   GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PB10 PB8 PB9 (액추에이터 제어 등) */
-  GPIO_InitStruct.Pin = GPIO_PIN_10|GPIO_PIN_8|GPIO_PIN_9;
+  /*Configure GPIO pins : PB10 PB8 PB9 PB14 PB15 */
+  GPIO_InitStruct.Pin = GPIO_PIN_10|GPIO_PIN_8|GPIO_PIN_9|GPIO_PIN_14|GPIO_PIN_15;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PA9 */
+  GPIO_InitStruct.Pin = GPIO_PIN_9;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /* EXTI interrupt init*/
   HAL_NVIC_SetPriority(EXTI1_IRQn, 6, 0);
@@ -673,22 +690,9 @@ static void CanRxTask(void *argument)
 {
   (void)argument;
   MCP2515_CanMsg rx;
-  uint32_t diag_tick = 0U;
-
-  printf("[CAN] CanRxTask started — waiting for INT\r\n");
 
   for (;;)
   {
-    uint32_t now = osKernelGetTickCount();
-    if (now - diag_tick >= 10000U)
-    {
-      diag_tick = now;
-      osMutexAcquire(canMutex, osWaitForever);
-      printf("[CAN-DIAG] periodic ---\r\n");
-      MCP2515_PrintDiag(&hmcp2515);
-      osMutexRelease(canMutex);
-    }
-
     osSemaphoreAcquire(sem_can_int, 100U);
 
     osMutexAcquire(canMutex, osWaitForever);
@@ -700,17 +704,17 @@ static void CanRxTask(void *argument)
       if (rx.data[0] == CAN_CMD_BELT_STOP)
       {
         g_belt_ext_stop = true;
-        printf("[CAN] BELT_STOP received\r\n");
+        HAL_GPIO_WritePin(RELAY_GPIO_Port, RELAY_Pin, GPIO_PIN_RESET);
       }
       else if (rx.data[0] == CAN_CMD_BELT_RESUME)
       {
+        if (!g_belt_ext_stop)
+          continue;
+
         g_belt_ext_stop = false;
-        printf("[CAN] BELT_RESUME received\r\n");
-      }
-      else
-      {
-        printf("[CAN] Unknown cmd id=0x%03lX data=0x%02X\r\n",
-               (unsigned long)rx.id, rx.data[0]);
+        /* 비전 검사 중이 아니면 즉시 벨트 재개 */
+        if (!g_sensor_triggered)
+          HAL_GPIO_WritePin(RELAY_GPIO_Port, RELAY_Pin, GPIO_PIN_SET);
       }
     }
   }
@@ -718,6 +722,12 @@ static void CanRxTask(void *argument)
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN Header_StartDefaultTask */
+/**
+  * @brief  Function implementing the defaultTask thread.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartDefaultTask */
 void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN 5 */
@@ -729,18 +739,55 @@ void StartDefaultTask(void *argument)
   /* USER CODE END 5 */
 }
 
+/**
+  * @brief  Period elapsed callback in non blocking mode
+  * @note   This function is called  when TIM11 interrupt took place, inside
+  * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
+  * a global variable "uwTick" used as application time base.
+  * @param  htim : TIM handle
+  * @retval None
+  */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
+  /* USER CODE BEGIN Callback 0 */
+
+  /* USER CODE END Callback 0 */
   if (htim->Instance == TIM11)
   {
     HAL_IncTick();
   }
+  /* USER CODE BEGIN Callback 1 */
+
+  /* USER CODE END Callback 1 */
 }
 
+/**
+  * @brief  This function is executed in case of error occurrence.
+  * @retval None
+  */
 void Error_Handler(void)
 {
+  /* USER CODE BEGIN Error_Handler_Debug */
+  /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
   while (1)
   {
   }
+  /* USER CODE END Error_Handler_Debug */
 }
+#ifdef USE_FULL_ASSERT
+/**
+  * @brief  Reports the name of the source file and the source line number
+  *         where the assert_param error has occurred.
+  * @param  file: pointer to the source file name
+  * @param  line: assert_param error line source number
+  * @retval None
+  */
+void assert_failed(uint8_t *file, uint32_t line)
+{
+  /* USER CODE BEGIN 6 */
+  /* User can add his own implementation to report the file name and line number,
+     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+  /* USER CODE END 6 */
+}
+#endif /* USE_FULL_ASSERT */

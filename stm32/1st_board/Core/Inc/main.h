@@ -60,6 +60,13 @@ typedef struct
 #define PI_RSP_LOG_SIZE       16U
 #define SENSOR_REARM_DELAY_MS 500U
 
+/* 1번 보드 → 전체 CAN 약통 정보 브로드캐스트 (0x101) */
+#define CAN_ID_1ST_TX        0x101U
+#define CAN_MSG_CONTAINER    0x01U   /* data[0] 메시지 타입 */
+#define CAN_COLOR_RED        'R'     /* 빨간 약통 (정상) */
+#define CAN_COLOR_BLUE       'B'     /* 파란 약통 (정상) */
+#define CAN_COLOR_NG         'N'     /* 불량 */
+
 /* 2번 보드 → 1번 보드 CAN 벨트 제어 프로토콜 */
 #define CAN_ID_2ND_TX        0x102U
 #define CAN_CMD_BELT_STOP    0x10U  /* 벨트 정지 요청 */
@@ -102,9 +109,9 @@ bool ReadSensor(void);
 #define SENSOR_GPIO_Port   GPIOB
 #define RELAY_Pin          GPIO_PIN_10
 #define RELAY_GPIO_Port    GPIOB
-#define ACT1_IN1_Pin       GPIO_PIN_8
+#define ACT1_IN1_Pin       GPIO_PIN_14
 #define ACT1_IN1_GPIO_Port GPIOB
-#define ACT1_IN2_Pin       GPIO_PIN_9
+#define ACT1_IN2_Pin       GPIO_PIN_15
 #define ACT1_IN2_GPIO_Port GPIOB
 #define MCP2515_CS_Pin       GPIO_PIN_4
 #define MCP2515_CS_GPIO_Port GPIOA
