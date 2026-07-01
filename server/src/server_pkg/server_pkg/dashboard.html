@@ -352,6 +352,7 @@
       addLog(`Waffle ${idx} 비활성화됨`, 'warn');
     }
     updateUI();
+    render(lastPoses);
   }
 
   function markReady(idx) {
@@ -562,11 +563,12 @@
       if (mapLoaded) ctx.drawImage(mapImg, 0, 0, MAP_W * SCALE, MAP_H * SCALE);
       ctx.restore();
 
-      if (poses[1] && typeof poses[1].x === 'number') {
+      // state.selected[0]=로봇1, [1]=로봇2 — 선택된 로봇만 그림
+      if (state.selected[0] && poses[1] && typeof poses[1].x === 'number') {
           const p1 = rotatePoint(rosToCanvas(poses[1].x, poses[1].y));
           drawMarker(p1.x, p1.y, poses[1].theta, '#38bdf8');
       }
-      if (poses[2] && typeof poses[2].x === 'number') {
+      if (state.selected[1] && poses[2] && typeof poses[2].x === 'number') {
           const p2 = rotatePoint(rosToCanvas(poses[2].x, poses[2].y));
           drawMarker(p2.x, p2.y, poses[2].theta, '#f87171');
       }
