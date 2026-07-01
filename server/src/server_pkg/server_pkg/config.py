@@ -12,12 +12,12 @@ OMX_CONFIGS = {
         "port": 9001,
 
         # ---- 역할 ----
-        "policy_name": "pick1_diffusion_ep0_400",   # 적재 정책 (로그/메시지용 짧은 이름)
+        "policy_name": "pick1_ep0_400",   # 적재 정책 (로그/메시지용 짧은 이름)
         "role": "loading",
 
         # ---- 로봇 실행 관련 (OMX1 PC 로컬에서만 사용) ----
         "robot_port": "/dev/omx_follower",          # TODO: 실제 시리얼 포트 확인 필요
-        "policy_path": "angrynose/pick1_diffusion_ep0_400",     # HuggingFace repo_id (로컬 캐시 사용)
+        "policy_path": "angrynose/pick1_ep0_400",     # HuggingFace repo_id (로컬 캐시 사용)
         "dataset_repo_id": "angrynose/pick1",          # 학습에 사용한 데이터셋 repo_id (메타데이터만 사용, action 이름 순서 확인용)
         "home_position": {
             "shoulder_pan.pos": 2.125,
@@ -40,12 +40,12 @@ OMX_CONFIGS = {
         "port": 9002,
 
         # ---- 역할 ----
-        "policy_name": "classify1_diffusion_p0_496",   # 분류 정책 (로그/메시지용 짧은 이름)
+        "policy_name": "classify1_diffusion_ep0_496",   # 분류 정책 (로그/메시지용 짧은 이름)
         "role": "sorting",
 
         # ---- 로봇 실행 관련 (OMX2 PC 로컬에서만 사용) ----
         "robot_port": "/dev/omx_follower",          # TODO: 실제 시리얼 포트 확인 필요 (OMX1과 PC가 다르면 보통 같은 경로명일 수 있음)
-        "policy_path": "angrynose/classify1_diffusion_ep0_316",   # HuggingFace repo_id (로컬 캐시 사용)
+        "policy_path": "angrynose/classify1_diffusion_ep0_496",   # HuggingFace repo_id (로컬 캐시 사용)
         "dataset_repo_id": "angrynose/classify1",   # TODO: 실제 학습 데이터셋 repo_id 확인 필요 (train_config.json의 dataset.repo_id 값)
         "home_position": {
             "shoulder_pan.pos": -0.757,

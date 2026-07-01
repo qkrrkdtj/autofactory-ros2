@@ -16,13 +16,16 @@ import threading
 import time
 
 from .config import OMX_CONFIGS, CONNECT_TIMEOUT, RECONNECT_INTERVAL, MESSAGE_DELIMITER
-from .protocol import decode_message, encode_message, make_execute_policy_request
+from .protocol import (
+    decode_message, encode_message,
+    make_execute_policy_request, make_check_departure_request,
+)
 
 
 class OmxConnection:
     """OMX1 또는 OMX2 한 대에 대한 TCP 연결 + 상태 관리"""
 
-    def __init__(self, omx_id: str, on_cycle_done=None):
+    def __init__(self, omx_id: str, on_cycle_done=None, on_depart_check=None):
         self.omx_id = omx_id
         self.cfg = OMX_CONFIGS[omx_id]
         self.host = self.cfg["host"]
@@ -33,12 +36,17 @@ class OmxConnection:
         self.busy = False
         self.completed_count = 0
         self.pending_request_id: str | None = None
+        self.pending_depart_request_id: str | None = None
 
         # ── [추가] 정책 완료 시 호출할 콜백 ──
         # signature: on_cycle_done(omx_id: str, success: bool)
         # OMX 수신 스레드에서 호출되므로, 콜백 안에서 asyncio 루프로 넘길 때는
         # call_soon_threadsafe 를 써야 한다 (미션 매니저가 그렇게 처리함).
         self.on_cycle_done = on_cycle_done
+
+        # ── [추가] 카메라 출발판정(depart_check) 응답 시 호출할 콜백 ──
+        # signature: on_depart_check(omx_id, wp, depart_ok, counts, tray_found)
+        self.on_depart_check = on_depart_check
 
         self._lock = threading.Lock()
         self._stop = False
@@ -109,6 +117,8 @@ class OmxConnection:
             self._on_ack(msg)
         elif msg_type == "cycle_done":
             self._on_cycle_done(msg)
+        elif msg_type == "depart_check":
+            self._on_depart_check(msg)
         else:
             print(f"[{self.omx_id}] 알 수 없는 메시지 타입: {msg}")
 
@@ -137,6 +147,43 @@ class OmxConnection:
         # ── [추가] 완료를 외부(미션 매니저)에 알림 ──
         if self.on_cycle_done is not None:
             self.on_cycle_done(self.omx_id, bool(msg["success"]))
+
+    def _on_depart_check(self, msg: dict):
+        """OMX가 사진 촬영+카운트 후 보낸 출발판정 응답 처리."""
+        wp = msg.get("wp")
+        depart_ok = bool(msg.get("depart_ok"))
+        counts = msg.get("counts", {})
+        tray_found = bool(msg.get("tray_found"))
+        print(f"[{self.omx_id}] 출발검증 응답 wp={wp} depart_ok={depart_ok} "
+              f"counts={counts} tray_found={tray_found} (request_id={msg.get('request_id')})")
+        with self._lock:
+            self.pending_depart_request_id = None
+
+        # ── 판정 결과를 외부(미션 매니저)에 알림 ──
+        if self.on_depart_check is not None:
+            self.on_depart_check(self.omx_id, wp, depart_ok, counts, tray_found)
+
+    def check_departure(self, wp: str) -> bool:
+        """OMX에 출발 검증(사진 촬영 + 카운트) 요청 전송.
+        반환 True=요청 전송됨, False=전송 불가(미연결).
+        실제 판정 결과는 비동기로 on_depart_check 콜백으로 전달됨.
+        (busy 와 무관 — 정책 완료 직후 팔이 원점인 상태에서 호출되므로)"""
+        with self._lock:
+            if not self.connected or self.sock is None:
+                print(f"[{self.omx_id}] 연결되어 있지 않아 출발검증 요청을 보낼 수 없습니다.")
+                return False
+
+            req = make_check_departure_request(wp)
+            try:
+                self.sock.sendall(encode_message(req))
+            except OSError as e:
+                print(f"[{self.omx_id}] 출발검증 요청 전송 실패: {e}")
+                return False
+
+            self.pending_depart_request_id = req["request_id"]
+            print(f"[{self.omx_id}] 출발검증 요청 전송: wp={wp} "
+                  f"(request_id={req['request_id']})")
+            return True
 
     def run_policy(self) -> bool:
         """

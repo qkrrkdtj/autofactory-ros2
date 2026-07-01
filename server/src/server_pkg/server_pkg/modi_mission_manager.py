@@ -17,8 +17,12 @@ class MissionManager:
 
         self.omx_connections = omx_connections or {}
         self.WP_TO_OMX = {'A': 'omx1', 'C': 'omx2'}
+        # 정책 완료(cycle_done) 대기 전용 슬롯
         self._omx_pending = {'A': None, 'C': None}
-        self.DEPART_TARGET = {'A': 3, 'C': 3}
+        # 카메라 출발판정(depart_check) 응답 대기 전용 슬롯
+        self._depart_pending = {'A': None, 'C': None}
+        # 수동 해제(=OpenCV 판정 무시 강제출발) 전용 슬롯
+        self._manual_pending = {'A': None, 'C': None}
 
         yaml_path = os.path.join(os.path.dirname(__file__), 'waypoints.yaml')
         with open(yaml_path, 'r') as f:
@@ -47,38 +51,59 @@ class MissionManager:
     # 외부 공개 메서드
     # ──────────────────────────────────────────────
     def signal_resume(self, target_wp):
+        """대시보드/키보드의 A·C 해제 버튼.
+        = OpenCV 판정을 무시하고 그 자리에서 강제 출발시키는 오버라이드."""
         if self._loop is None:
             self.server_node.get_logger().error('[오류] 아직 미션 루프가 초기화되지 않았습니다.')
             return
         if target_wp not in self.WP_TO_OMX:
             self.server_node.get_logger().error(f'[오류] {target_wp}는 유효한 대기 지점이 아닙니다.')
             return
-        if self._omx_pending.get(target_wp) is None:
+        if self._manual_pending.get(target_wp) is None:
             self.server_node.get_logger().warn(
                 f'[수동신호] {target_wp}: 현재 대기 중인 작업이 없습니다 (로봇이 아직 도착 안 했거나 이미 출발).'
             )
             self.push_log(f'⚠ {target_wp} 신호: 현재 대기 중인 작업 없음', 'warn')
             return
-        self._loop.call_soon_threadsafe(self._resolve_pending, target_wp, True)
-        self.server_node.get_logger().info(f'[수동신호] {target_wp} 대기 해제 명령 수신!')
-        self.push_log(f'🔓 {target_wp} 구역 수동 해제', 'success')
+        self._loop.call_soon_threadsafe(self._resolve_manual, target_wp)
+        self.server_node.get_logger().info(f'[수동신호] {target_wp} 강제 출발 명령 수신!')
+        self.push_log(f'🔓 {target_wp} 구역 수동 해제 (강제 출발)', 'success')
 
-    def on_omx_done(self, omx_id, success):
-        if self._loop is None:
-            return
-        wp = None
+    def _omx_id_to_wp(self, omx_id):
         for w, oid in self.WP_TO_OMX.items():
             if oid == omx_id:
-                wp = w
-                break
+                return w
+        return None
+
+    def on_omx_done(self, omx_id, success):
+        """OMX 정책 1회 완료(cycle_done) 콜백. OMX 수신 스레드에서 호출됨."""
+        if self._loop is None:
+            return
+        wp = self._omx_id_to_wp(omx_id)
         if wp is None:
             return
         self._loop.call_soon_threadsafe(self._resolve_pending, wp, success)
+
+    def on_omx_depart_check(self, omx_id, wp, depart_ok, counts, tray_found):
+        """OMX 카메라 출발판정(depart_check) 응답 콜백. OMX 수신 스레드에서 호출됨."""
+        if self._loop is None:
+            return
+        self._loop.call_soon_threadsafe(self._resolve_depart, wp, depart_ok)
 
     def _resolve_pending(self, target_wp, success):
         fut = self._omx_pending.get(target_wp)
         if fut is not None and not fut.done():
             fut.set_result(success)
+
+    def _resolve_depart(self, target_wp, depart_ok):
+        fut = self._depart_pending.get(target_wp)
+        if fut is not None and not fut.done():
+            fut.set_result(depart_ok)
+
+    def _resolve_manual(self, target_wp):
+        fut = self._manual_pending.get(target_wp)
+        if fut is not None and not fut.done():
+            fut.set_result(True)
 
     # ──────────────────────────────────────────────
     # 내부 헬퍼
@@ -94,31 +119,63 @@ class MissionManager:
         while self.shared_state.get('paused', False):
             await asyncio.sleep(0.1)
 
-    async def _check_departure(self, wp_name, done_count) -> bool:
-        target = self.DEPART_TARGET.get(wp_name, 1)
-        return done_count >= target
+    def _omx_available(self, wp_name) -> bool:
+        """해당 지점 OMX가 실제로 연결되어 명령을 받을 수 있는 상태인지."""
+        omx = self.omx_connections.get(self.WP_TO_OMX.get(wp_name))
+        return omx is not None and getattr(omx, "connected", False)
+
+    async def _check_departure(self, wp_name) -> bool:
+        """OMX에 사진 촬영+카운트를 요청해 출발 여부를 판정받는다.
+        - 카메라 OK  → True (자동 출발)
+        - 미충족     → False (호출부가 다음 사이클 재추론)
+        판정 주체는 OMX executor(config의 depart_target_count: A==3, C==0)."""
+        if not self._omx_available(wp_name):
+            # 연결 안 됨 → 판정 불가. 여기서 True를 주면 즉시 출발해버리므로
+            # 판정은 하지 않고, 자동 통과 여부는 상위(_run_omx_and_wait)가 결정한다.
+            return False
+
+        omx = self.omx_connections[self.WP_TO_OMX[wp_name]]
+        fut = self._loop.create_future()
+        self._depart_pending[wp_name] = fut
+
+        if not omx.check_departure(wp_name):
+            self._depart_pending[wp_name] = None
+            self.push_log(f'⚠ {wp_name} 출발검증 요청 전송 실패', 'warn')
+            return False
+
+        try:
+            depart_ok = await asyncio.wait_for(fut, timeout=15.0)
+        except asyncio.TimeoutError:
+            self.push_log(f'⚠ {wp_name} 출발검증 응답 없음(timeout) — 재추론', 'warn')
+            depart_ok = False
+        finally:
+            self._depart_pending[wp_name] = None
+
+        return depart_ok
 
     async def _run_one_cycle(self, robot_id, wp_name) -> bool:
+        """OMX 정책 1회 실행 요청 후 완료(cycle_done)까지 대기.
+        연결이 안 돼 있으면 실행 자체가 불가하므로 None을 반환한다
+        (상위에서 '자동 통과' 신호로 해석)."""
         omx_id = self.WP_TO_OMX[wp_name]
         omx = self.omx_connections.get(omx_id)
+
+        if omx is None or not getattr(omx, "connected", False):
+            self.server_node.get_logger().warn(
+                f'[{robot_id}] {wp_name}: OMX({omx_id}) 연결 없음 — 이번 지점 건너뜀'
+            )
+            return None
 
         fut = self._loop.create_future()
         self._omx_pending[wp_name] = fut
 
-        if omx is None:
-            self.server_node.get_logger().warn(
-                f'[{robot_id}] {wp_name}: OMX({omx_id}) 연결 없음 — 이번 동작 건너뜀'
-            )
-            self._omx_pending[wp_name] = None
-            return True
-
         sent = omx.run_policy()
         if not sent:
             self.server_node.get_logger().error(
-                f'[{robot_id}] {wp_name}: OMX({omx_id}) 요청 전송 실패 — 이번 동작 건너뜀'
+                f'[{robot_id}] {wp_name}: OMX({omx_id}) 요청 전송 실패 — 이번 지점 건너뜀'
             )
             self._omx_pending[wp_name] = None
-            return True
+            return None
 
         success = await fut
         self._omx_pending[wp_name] = None
@@ -126,25 +183,66 @@ class MissionManager:
 
     async def _run_omx_and_wait(self, robot_id, wp_name):
         rname = 'Waffle 1' if robot_id == 'robot1' else 'Waffle 2'
-        self.push_log(f'🔧 {rname}: {wp_name} OMX 작업 시작 (목표 {self.DEPART_TARGET.get(wp_name)}회)', 'info')
+
+        # ── OMX 미연결이면 이 지점 작업 전체를 자동으로 건너뛴다 ──
+        if not self._omx_available(wp_name):
+            omx_id = self.WP_TO_OMX.get(wp_name)
+            self.push_log(f'⏭ {rname}: {wp_name} OMX({omx_id}) 미연결 — 작업 건너뛰고 통과', 'warn')
+            self.server_node.get_logger().warn(
+                f'[{robot_id}] {wp_name}: OMX({omx_id}) 미연결 — 자동 통과'
+            )
+            return
+
+        self.push_log(f'🔧 {rname}: {wp_name} OMX 작업 시작 (카메라 출발판정)', 'info')
         self.server_node.get_logger().warn(
-            f'[{robot_id}] {wp_name} 도착 — OMX 작업 시작 (목표 {self.DEPART_TARGET.get(wp_name)}회)'
+            f'[{robot_id}] {wp_name} 도착 — OMX 작업 시작 (카메라 출발판정)'
         )
 
+        # ── 수동 해제(강제출발) 슬롯을 이 지점 작업 내내 열어둔다 ──
+        # 검출이 계속 미충족이어도 사람이 대시보드 버튼으로 언제든 빼낼 수 있게.
+        manual_fut = self._loop.create_future()
+        self._manual_pending[wp_name] = manual_fut
+
         done_count = 0
-        while True:
-            success = await self._run_one_cycle(robot_id, wp_name)
-            done_count += 1
-            rname = 'Waffle 1' if robot_id == 'robot1' else 'Waffle 2'
-            self.push_log(f'🔧 {rname}: {wp_name} 동작 {done_count}회 완료', 'success' if success else 'warn')
-            self.server_node.get_logger().info(
-                f'[{robot_id}] {wp_name} 동작 {done_count}회 완료 (success={success})'
-            )
-            if await self._check_departure(wp_name, done_count):
-                break
+        try:
+            while True:
+                # 강제출발(수동)이 이미 눌렸으면 즉시 출발
+                if manual_fut.done():
+                    self.push_log(f'🔓 {rname}: {wp_name} 수동 강제출발', 'success')
+                    break
+
+                success = await self._run_one_cycle(robot_id, wp_name)
+
+                # 사이클 도중 미연결로 바뀌었으면(연결 끊김) 자동 통과
+                if success is None:
+                    self.push_log(f'⏭ {rname}: {wp_name} OMX 실행 불가 — 통과', 'warn')
+                    break
+
+                done_count += 1
+                self.push_log(f'🔧 {rname}: {wp_name} 동작 {done_count}회 완료',
+                              'success' if success else 'warn')
+                self.server_node.get_logger().info(
+                    f'[{robot_id}] {wp_name} 동작 {done_count}회 완료 (success={success})'
+                )
+
+                # 카메라 판정: 충족이면 자동 출발
+                if await self._check_departure(wp_name):
+                    self.push_log(f'📸 {rname}: {wp_name} 카메라 출발조건 충족 — 출발', 'success')
+                    break
+
+                # 미충족: 수동 강제출발이 그새 눌렸는지 확인, 아니면 다음 사이클 재추론
+                if manual_fut.done():
+                    self.push_log(f'🔓 {rname}: {wp_name} 수동 강제출발', 'success')
+                    break
+
+                self.push_log(
+                    f'🔁 {rname}: {wp_name} 출발조건 미충족 — 재추론 (필요시 수동 해제 가능)', 'info'
+                )
+        finally:
+            self._manual_pending[wp_name] = None
 
         self.server_node.get_logger().info(
-            f'[{robot_id}] {wp_name} 출발 조건 충족 ({done_count}회 완료) — 출발!'
+            f'[{robot_id}] {wp_name} 출발 — ({done_count}회 완료)'
         )
 
     async def move_robot(self, client, robot_id):

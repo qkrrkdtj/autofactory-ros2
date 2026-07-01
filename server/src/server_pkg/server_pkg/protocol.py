@@ -39,6 +39,13 @@ def make_execute_policy_request(policy_name: str, request_id: str = None) -> dic
         "request_id": request_id or new_request_id(),
     }
 
+def make_check_departure_request(wp: str, request_id: str = None) -> dict:
+    """관제 -> OMX: 출발 검증(사진 촬영 + 카운트) 요청"""
+    return {
+        "cmd": "check_departure",
+        "wp": wp,
+        "request_id": request_id or new_request_id(),
+    }
 
 # ---- 메시지 생성 헬퍼 (OMX -> 관제) ----
 

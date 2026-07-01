@@ -456,6 +456,7 @@ def main(args=None):
 
         for omx in omx_connections.values():
             omx.on_cycle_done = mission.on_omx_done
+            omx.on_depart_check = mission.on_omx_depart_check
 
         threading.Thread(target=start_mission, args=(mission,), daemon=True).start()
 
