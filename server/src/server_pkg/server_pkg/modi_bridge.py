@@ -6,6 +6,7 @@ from rclpy.executors import MultiThreadedExecutor
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import Twist, TwistStamped, PoseWithCovarianceStamped
 from sensor_msgs.msg import BatteryState
+from nav_msgs.msg import Odometry
 from server_pkg.modi_mission_manager import MissionManager, start_mission
 from server_pkg.modi_flask import create_flask_app
 from server_pkg.omx_link import OmxConnection
@@ -23,12 +24,15 @@ from nav2_msgs.action import NavigateToPose
 # 1. 액션 프록시 (스레드 씹힘 방지 & 일시정지 적용)
 # ==========================================
 class ActionProxy:
-    def __init__(self, server_node, robot_node, server_action_name, robot_action_name, robot_id, shared_state, shared_pose_state):
+    def __init__(self, server_node, robot_node, server_action_name, 
+                 robot_action_name, robot_id, shared_state, 
+                 shared_pose_state,shared_odom_state):
         self.server_node = server_node
         self.robot_node = robot_node
         self.robot_id = robot_id
         self.shared_state = shared_state
         self.shared_pose_state = shared_pose_state
+        self.shared_odom_state = shared_odom_state 
         self.active_client_goal_handle = None
         self._wants_pause = False
         self.last_goal = None
@@ -101,97 +105,135 @@ class ActionProxy:
         done.wait()
 
     def _p_correction_sync(self):
-        # ── 정밀 정차가 필요한 포인트(A, C)에서만 보정 ──
         if self.shared_state.get('current_wp') not in ['A', 'C']:
             return
         if self.last_goal is None:
             return
 
+        # ── ① amcl로 목표 위치를 '한 번만' 측정 ──
+        pose = self.shared_pose_state.get(self.robot_id)
+        if pose is None:
+            return
         target_x = self.last_goal.pose.pose.position.x
         target_y = self.last_goal.pose.pose.position.y
         q = self.last_goal.pose.pose.orientation
-        target_yaw = math.atan2(
-            2.0 * (q.w * q.z + q.x * q.y),
-            1.0 - 2.0 * (q.y * q.y + q.z * q.z)
-        )
+        target_yaw = math.atan2(2.0*(q.w*q.z+q.x*q.y), 1.0-2.0*(q.y*q.y+q.z*q.z))
 
-        Kp_lin = 0.3
-        Kp_ang = 0.5
-        Kd_ang = 0.15
-        
-        THRESHOLD_XY  = 0.03   # 3cm
-        THRESHOLD_YAW = 0.06   # 3.5도
-        TIMEOUT = 15.0
-        dt = 0.1
+        dx, dy = target_x-pose['x'], target_y-pose['y']
+        c, s = math.cos(pose['theta']), math.sin(pose['theta'])
+        goal_fwd =  c*dx + s*dy      # +앞 / -뒤
+        goal_lat = -s*dx + c*dy      # +왼 / -오
+        goal_final_yaw = math.atan2(math.sin(target_yaw-pose['theta']),
+                                    math.cos(target_yaw-pose['theta']))
 
-        start_time = time.time()
-        last_log_dist = None
-        last_log_yaw = None
-        
-        while True:
-            if time.time() - start_time > TIMEOUT:
-                self.server_node.get_logger().warn(f"[{self.robot_id}] P correction timeout")
-                break
+        self.server_node.get_logger().info(
+            f"[{self.robot_id}] 보정측정 fwd={goal_fwd*100:.1f}cm lat={goal_lat*100:.1f}cm")
 
-            if self._wants_pause:
-                break
+        if math.hypot(goal_fwd, goal_lat) > 0.30:
+            self.server_node.get_logger().warn(f"[{self.robot_id}] 거리 과다 중단")
+            return
 
-            pose = self.shared_pose_state.get(self.robot_id)
-            if pose is None:
-                time.sleep(dt)
-                continue
-
-            dx = target_x - pose['x']
-            dy = target_y - pose['y']
-            dist = math.sqrt(dx**2 + dy**2)
-            yaw_err = math.atan2(
-                math.sin(target_yaw - pose['theta']),
-                math.cos(target_yaw - pose['theta'])
-            )
-
-            yaw_deg = math.degrees(yaw_err)
-            if (last_log_dist is None
-                    or abs(dist - last_log_dist) >= 0.005       # 5mm 이상 변하면
-                    or abs(yaw_deg - last_log_yaw) >= 1.0):      # 1도 이상 변하면
-                self.server_node.get_logger().info(
-                    f"[{self.robot_id}] P보정 중 — dist={dist:.3f}m  yaw={yaw_deg:.1f}°"
-                )
-                last_log_dist = dist
-                last_log_yaw = yaw_deg
-
-            if dist < THRESHOLD_XY and abs(yaw_err) < THRESHOLD_YAW:
-                self.server_node.get_logger().info(f"[{self.robot_id}] P correction 완료 ✅")
-                break
-
-            angle_to_goal = math.atan2(dy, dx)
-            heading_err = math.atan2(
-                math.sin(angle_to_goal - pose['theta']),
-                math.cos(angle_to_goal - pose['theta'])
-            )
-
-            lin_x = 0.0
-            ang_z = 0.0
-            if dist > THRESHOLD_XY:
-                lin_x = max(-0.10, min(0.10, Kp_lin * dist))
-                ang_z = max(-0.5,  min(0.5,  Kp_ang * heading_err))
+        # ── ② 이동 계획 수립 ──
+        LAT_TOL = 0.02
+        if abs(goal_lat) < LAT_TOL:
+            turn1 = 0.0
+            drive = goal_fwd              # +전진 / -후진
+            turn2 = goal_final_yaw
+        else:
+            ang_to_goal = math.atan2(goal_lat, goal_fwd)
+            if abs(ang_to_goal) <= math.pi/2:
+                turn1 = ang_to_goal
+                drive = math.hypot(goal_fwd, goal_lat)     # 전진
             else:
-                # PD 제어
-                d_term = 0.0
-                if prev_yaw_err is not None:
-                    d_term = Kd_ang * (yaw_err - prev_yaw_err) / dt
-                az = Kp_ang * yaw_err + d_term
+                turn1 = math.atan2(math.sin(ang_to_goal - math.pi),
+                                   math.cos(ang_to_goal - math.pi))
+                drive = -math.hypot(goal_fwd, goal_lat)    # 후진
+            turn2 = math.atan2(math.sin(goal_final_yaw - turn1),
+                               math.cos(goal_final_yaw - turn1))
 
-                if abs(yaw_err) < THRESHOLD_YAW:
-                    az = 0.0
-                elif abs(az) < 0.10:
-                    az = 0.10 if az > 0 else -0.10
-                ang_z = max(-0.3, min(0.3, az))
-            
-            self.cmd_vel_pub.publish(self._make_twist_stamped(lin_x, ang_z))
-            prev_yaw_err = yaw_err
+        self.server_node.get_logger().info(
+            f"[{self.robot_id}] 계획: 회전1={math.degrees(turn1):+.1f}° "
+            f"{'전진' if drive>=0 else '후진'}={abs(drive)*100:.1f}cm "
+            f"회전2={math.degrees(turn2):+.1f}°")
+
+        # ── ③ odom으로 순차 실행 ──
+        if not self._odom_rotate(turn1):  return
+        if not self._odom_drive(drive):   return
+        if not self._odom_rotate(turn2):  return
+
+        self.server_node.get_logger().info(f"[{self.robot_id}] 정밀보정 완료 ✅")
+        self.cmd_vel_pub.publish(self._make_twist_stamped())
+
+
+    # ── odom 기준 제자리 회전 ──
+    def _odom_rotate(self, angle):
+        """angle 라디안만큼 제자리 회전. 부호=방향(+반시계/-시계). 최단방향은 호출부에서 결정."""
+        if abs(angle) < 0.02:
+            return True
+        od0 = self.shared_odom_state.get(self.robot_id)
+        if od0 is None:
+            self.server_node.get_logger().warn(f"[{self.robot_id}] odom 없음")
+            return False
+        yaw0 = od0['theta']
+
+        # 누적 회전량 추적 (wrap 방지)
+        prev = yaw0
+        accumulated = 0.0
+        Kp, W_MAX, W_MIN = 1.5, 0.5, 0.12
+        start, dt = time.time(), 0.05
+
+        while time.time()-start < 10.0 and not self._wants_pause:
+            od = self.shared_odom_state.get(self.robot_id)
+            if od is None:
+                time.sleep(dt); continue
+            # 매 스텝 증분을 누적 (±π 경계 안전)
+            d = math.atan2(math.sin(od['theta']-prev), math.cos(od['theta']-prev))
+            accumulated += d
+            prev = od['theta']
+
+            rem = angle - accumulated      # 남은 회전량 (부호 유지)
+            if abs(rem) < 0.008:
+                break
+            w = Kp*rem
+            if abs(w) < W_MIN: w = math.copysign(W_MIN, w)
+            w = max(-W_MAX, min(W_MAX, w))
+            self.cmd_vel_pub.publish(self._make_twist_stamped(0.0, w))
             time.sleep(dt)
 
-        self.cmd_vel_pub.publish(self._make_twist_stamped())  # 정지
+        self.cmd_vel_pub.publish(self._make_twist_stamped())
+        time.sleep(0.2)
+        return not self._wants_pause
+
+
+    # ── odom 기준 직진(부호로 전/후진) ──
+    def _odom_drive(self, distance):
+        if abs(distance) < 0.01:
+            return True
+        od0 = self.shared_odom_state.get(self.robot_id)
+        if od0 is None:
+            self.server_node.get_logger().warn(f"[{self.robot_id}] odom 없음")
+            return False
+        x0, y0, yaw0 = od0['x'], od0['y'], od0['theta']
+        sign = 1.0 if distance >= 0 else -1.0
+        target = abs(distance)
+        Kp, V_MAX, V_MIN = 1.0, 0.08, 0.02
+        start, dt = time.time(), 0.05
+        while time.time()-start < 12.0 and not self._wants_pause:
+            od = self.shared_odom_state.get(self.robot_id)
+            if od is None: time.sleep(dt); continue
+            mdx, mdy = od['x']-x0, od['y']-y0
+            moved = abs(math.cos(yaw0)*mdx + math.sin(yaw0)*mdy)
+            rem = target - moved
+            if rem < 0.005:
+                break
+            v = Kp*rem
+            if v < V_MIN: v = V_MIN
+            v = min(V_MAX, v) * sign          # 부호로 전/후진
+            self.cmd_vel_pub.publish(self._make_twist_stamped(v, 0.0))
+            time.sleep(dt)
+        self.cmd_vel_pub.publish(self._make_twist_stamped())
+        time.sleep(0.2)
+        return not self._wants_pause
 
     def cancel_current_goal(self):
         if self.active_client_goal_handle:
@@ -226,6 +268,21 @@ class PoseTracker:
         )
         self.shared_pose_state[self.robot_id] = {'x': x, 'y': y, 'theta': yaw}
 
+class OdomTracker:
+    def __init__(self, robot_node, robot_id, shared_odom_state):
+        self.robot_node = robot_node
+        self.robot_id = robot_id
+        self.shared_odom_state = shared_odom_state
+        self.sub = self.robot_node.create_subscription(
+            Odometry, 'odom', self.odom_callback, 10)
+
+    def odom_callback(self, msg):
+        p = msg.pose.pose.position
+        q = msg.pose.pose.orientation
+        yaw = math.atan2(2.0*(q.w*q.z + q.x*q.y),
+                         1.0 - 2.0*(q.y*q.y + q.z*q.z))
+        self.shared_odom_state[self.robot_id] = {'x': p.x, 'y': p.y, 'theta': yaw}
+        
 
 # ==========================================
 # 3. 배터리 추적 (Battery Tracker)
@@ -294,9 +351,11 @@ def main(args=None):
     }
     shared_pose_state    = {}  # { robot_id: {x, y, theta} }
     shared_battery_state = {}  # { robot_id: 퍼센트(float) }
+    shared_odom_state    = {}
 
     active_proxies   = []
     pose_trackers    = []
+    odom_trackers    = [] 
     battery_trackers = []
 
     print("==================================================")
@@ -313,6 +372,7 @@ def main(args=None):
             robot_id=robot_id,
             shared_state=shared_state,
             shared_pose_state=shared_pose_state,
+            shared_odom_state=shared_odom_state,
         )
         active_proxies.append(proxy)
 
@@ -322,6 +382,12 @@ def main(args=None):
         )
         pose_trackers.append(tracker_p)
 
+        tracker_o = OdomTracker(                       # ← 추가
+            robot_node=target_robot['node'], robot_id=robot_id,
+            shared_odom_state=shared_odom_state,
+        )
+        odom_trackers.append(tracker_o)
+        
         tracker_b = BatteryTracker(
             robot_node=target_robot['node'], robot_id=robot_id,
             shared_battery_state=shared_battery_state,
@@ -346,11 +412,11 @@ def main(args=None):
 
     def on_robot1_ready():
         robot_ready_events[1].set()
-        print("✅ Waffle 1 keepout 확인 완료")
+        print("✅ Waffle 1 준비 완료")
 
     def on_robot2_ready():
         robot_ready_events[2].set()
-        print("✅ Waffle 2 keepout 확인 완료")
+        print("✅ Waffle 2 준비 완료")
 
     try:
         launch_all(on_robot1_ready=on_robot1_ready, on_robot2_ready=on_robot2_ready)
@@ -358,7 +424,7 @@ def main(args=None):
         def on_all_ready():
             robot_ready_events[1].set()
             robot_ready_events[2].set()
-            print("✅ 전체 keepout 확인 완료")
+            print("✅ 전체 확인 완료")
         launch_all(on_all_ready=on_all_ready)
 
     threading.Thread(target=keyboard_listener, args=(mission_holder,), daemon=True).start()

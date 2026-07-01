@@ -71,14 +71,14 @@ def launch_all(on_robot1_ready=None, on_robot2_ready=None):
     def wait_and_notify_1():
         print("⏳ [Waffle 1] /keepout_filter_mask 대기 중 (Domain 31)...")
         wait_for_topic_by_domain('/keepout_filter_mask', 31)
-        print("✅ [Waffle 1] keepout_filter 확인 완료!")
+        
         if on_robot1_ready:
             on_robot1_ready()
 
     def wait_and_notify_2():
         print("⏳ [Waffle 2] /keepout_filter_mask 대기 중 (Domain 32)...")
         wait_for_topic_by_domain('/keepout_filter_mask', 32)
-        print("✅ [Waffle 2] keepout_filter 확인 완료!")
+        
         if on_robot2_ready:
             on_robot2_ready()
     
