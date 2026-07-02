@@ -28,7 +28,16 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define STEPS_PER_DISPENSE  (520U * 2U)  /* 520스텝 × 2토글 (1/16 마이크로스텝) */
+#define STEPS_PER_DISPENSE  (520U * 2U)  /* 1정 투입 스텝 수 (520스텝 × 2토글, 1/16 마이크로스텝) */
+
+/* 알약 투입 공정 타이밍·설정 — 현장 튜닝 시 이 값만 수정 */
+#define PILLS_PER_BOTTLE           2U    /* 약통당 알약 투입 정수 */
+#define CONTAINER_QUEUE_DEPTH      8U    /* CAN 약통 정보 대기 큐 깊이 */
+#define CONTAINER_QUEUE_WAIT_MS  200U    /* 센서 감지 시 큐 pop 최대 대기 */
+#define BELT_STOP_SETTLE_MS        200U  /* 1번 보드 벨트 STOP 반영 대기 */
+#define PILL_INTERVAL_MS           500U  /* 알약 1정 투입 간격 */
+#define POST_DISPENSE_MS           500U  /* 투입 완료 후 RESUME 전 안정화 */
+#define PILL_SENSOR_REARM_MS       500U  /* 알약 센서 클리어 후 재무장 대기 */
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -57,11 +66,9 @@ osSemaphoreId_t   sem_can_rx;            /* MCP2515 INT → CanRxTask 즉시 기
 osMessageQueueId_t containerQueue;       /* 1번 보드 약통 정보 수신 큐 (최대 8) */
 
 osSemaphoreId_t   sem_dispense_done;     /* TIM2 ISR → Task: 스텝 완료 신호 */
-osSemaphoreId_t   sem_uart_trigger;      /* UART ISR → Task: 수동 트리거 신호 */
 osSemaphoreId_t   sem_pill_trigger;      /* PB8 IR 센서 EXTI → Task: 약통 도착 신호 */
 volatile uint32_t tim_toggle_count   = 0U;
 volatile uint32_t tim_target_toggles = 0U;
-static uint8_t    uart_rx_buf;           /* UART 수신 1바이트 버퍼 */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -83,6 +90,22 @@ int __io_putchar(int ch)
 {
   HAL_UART_Transmit(&huart2, (uint8_t *)&ch, 1, HAL_MAX_DELAY);
   return ch;
+}
+
+/* 약통 seq 연속성 검증: 직전 seq+1과 다르면 누락/중복으로 보고 후 현재 값으로 재동기화한다.
+ * last_seq/have_last는 호출부의 static 상태를 가리킨다. */
+static void Seq_CheckContinuity(const char *tag, uint8_t seq,
+                                uint8_t *last_seq, uint8_t *have_last)
+{
+  if (*have_last)
+  {
+    uint8_t expected = (uint8_t)(*last_seq + 1U);
+    if (seq != expected)
+      printf("%s 약통 번호 불연속! (기대 %u, 수신 %u) — 정보 누락 가능, 재동기화\r\n",
+             tag, expected, seq);
+  }
+  *last_seq  = seq;
+  *have_last = 1U;
 }
 
 /* 2번 보드가 STOP을 보낸 뒤에만 RESUME을 1회 전송한다. */
@@ -161,7 +184,7 @@ int main(void)
   MX_SPI1_Init();
   /* USER CODE BEGIN 2 */
   setvbuf(stdout, NULL, _IONBF, 0);
-  printf("\r\n=== Pill Dispenser Start ===\r\n");
+  printf("\r\n=== [2번 보드] 알약 투입기 시작 ===\r\n");
 
   HAL_GPIO_WritePin(STEPPER_ENA_GPIO_Port, STEPPER_ENA_Pin, GPIO_PIN_SET);  /* 초기: 모터 비활성 */
 
@@ -173,14 +196,14 @@ int main(void)
   if (MCP2515_AutoDetectOsc(&hmcp2515) != HAL_OK)
   {
     /* AutoDetect 실패 시 8MHz/125kbps로 명시적 초기화 후 Normal 모드 진입 */
-    printf("[CAN] AutoDetect failed — forcing 125kbps\r\n");
+    printf("[통신] CAN 초기화 실패 — 125kbps로 재시도\r\n");
     MCP2515_PrintDiag(&hmcp2515);
     MCP2515_SetNormalMode(&hmcp2515);
   }
   else
   {
     MCP2515_SetNormalMode(&hmcp2515);
-    printf("[CAN] MCP2515 ready\r\n");
+    printf("[통신] CAN 연결 완료\r\n");
   }
   /* USER CODE END 2 */
 
@@ -195,9 +218,6 @@ int main(void)
   /* USER CODE BEGIN RTOS_SEMAPHORES */
   sem_dispense_done = osSemaphoreNew(1U, 0U, NULL);
   if (sem_dispense_done == NULL) Error_Handler();
-
-  sem_uart_trigger = osSemaphoreNew(1U, 0U, NULL);
-  if (sem_uart_trigger == NULL) Error_Handler();
 
   /* PB8 IR 센서 (EXTI line 8) 세마포어 — 생성 후 NVIC 활성화 */
   sem_pill_trigger = osSemaphoreNew(1U, 0U, NULL);
@@ -214,17 +234,13 @@ int main(void)
   __HAL_GPIO_EXTI_CLEAR_IT(MCP2515_INT_Pin);
   HAL_NVIC_SetPriority(EXTI0_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(EXTI0_IRQn);
-
-  /* USART2 인터럽트 활성화 */
-  HAL_NVIC_SetPriority(USART2_IRQn, 5, 0);
-  HAL_NVIC_EnableIRQ(USART2_IRQn);
   /* USER CODE END RTOS_SEMAPHORES */
 
   /* USER CODE BEGIN RTOS_TIMERS */
   /* USER CODE END RTOS_TIMERS */
 
   /* USER CODE BEGIN RTOS_QUEUES */
-  containerQueue = osMessageQueueNew(8U, sizeof(ContainerInfo), NULL);
+  containerQueue = osMessageQueueNew(CONTAINER_QUEUE_DEPTH, sizeof(ContainerInfo), NULL);
   if (containerQueue == NULL) Error_Handler();
   /* USER CODE END RTOS_QUEUES */
 
@@ -519,7 +535,7 @@ static void CanRxTask(void *argument)
   (void)argument;
   MCP2515_CanMsg rx;
 
-  printf("[CAN-RX] Task started\r\n");
+  printf("[통신] 약통 정보 수신 대기 시작\r\n");
 
   for (;;)
   {
@@ -540,13 +556,13 @@ static void CanRxTask(void *argument)
     if (osMessageQueuePut(containerQueue, &info, 0U, 0U) == osOK)
     {
       uint32_t cnt = osMessageQueueGetCount(containerQueue);
-      printf("[Q:containerQueue] push seq=%u color=%c  [total %lu]\r\n",
+      printf("[수신] 약통 도착 (번호 %u, 색상 %c) — 대기 %lu개\r\n",
              info.seq, info.color, (unsigned long)cnt);
     }
     else
     {
-      printf("[Q:containerQueue] FULL — dropped seq=%u color=%c\r\n",
-             info.seq, info.color);
+      printf("[수신] 대기열 가득참 — 약통 번호 %u 누락\r\n",
+             info.seq);
     }
   }
 }
@@ -569,35 +585,16 @@ static void Dispense_Once(void)
   osSemaphoreAcquire(sem_dispense_done, osWaitForever);
 }
 
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
-{
-  if (huart->Instance == USART2)
-  {
-    if (uart_rx_buf == 'd' || uart_rx_buf == 'D')
-      osSemaphoreRelease(sem_uart_trigger);
-
-    HAL_UART_Receive_IT(&huart2, &uart_rx_buf, 1);  /* 다음 수신 재등록 */
-  }
-}
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN Header_StartDefaultTask */
-/*
- * 터미널 커맨드:
- *   d/D : 디스펜스 (가감속 풀 시퀀스)
- *   s/S : 극저속 테스트 — 10스텝, 1스텝당 500ms (탈조·배선 확인)
- *   e/E : ENA 토글 — 홀딩 토크 ON/OFF 확인 (ENA 극성 확인)
- *   p/P : 단발 펄스 1개 (PUL 핀 배선 확인)
- */
 /* USER CODE END Header_StartDefaultTask */
 void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN 5 */
   (void)argument;
 
-  HAL_UART_Receive_IT(&huart2, &uart_rx_buf, 1);
-  printf("[PILL] Ready.\r\n");
-  printf("  d = dispense  s = slow-test(10steps)  e = ENA toggle  p = single pulse\r\n");
+  printf("[준비] 약통 감지 대기 중\r\n");
 
   /* 부팅 시 스퓨리어스 EXTI 엣지로 쌓인 트리거 토큰 제거 */
   PillSensor_DrainPending();
@@ -607,60 +604,10 @@ void StartDefaultTask(void *argument)
 
   for (;;)
   {
-    /* ── 진단 커맨드 처리 ──────────────────────────────────── */
-    uint8_t cmd = uart_rx_buf;  /* 스냅샷 (ISR에서 덮어쓸 수 있음) */
-
-    if (cmd == 's' || cmd == 'S')
-    {
-      uart_rx_buf = 0;
-      printf("[DBG] Slow test: ENA LOW, 10 steps @ 500ms/step\r\n");
-      HAL_GPIO_WritePin(STEPPER_ENA_GPIO_Port, STEPPER_ENA_Pin, GPIO_PIN_RESET);
-      osDelay(50U);
-      for (int i = 0; i < 10; i++)
-      {
-        HAL_GPIO_WritePin(STEPPER_PUL_GPIO_Port, STEPPER_PUL_Pin, GPIO_PIN_SET);
-        osDelay(5U);
-        HAL_GPIO_WritePin(STEPPER_PUL_GPIO_Port, STEPPER_PUL_Pin, GPIO_PIN_RESET);
-        osDelay(495U);
-        printf("[DBG] Step %d/10\r\n", i + 1);
-      }
-      HAL_GPIO_WritePin(STEPPER_ENA_GPIO_Port, STEPPER_ENA_Pin, GPIO_PIN_SET);
-      printf("[DBG] Slow test done\r\n");
-      continue;
-    }
-
-    if (cmd == 'e' || cmd == 'E')
-    {
-      uart_rx_buf = 0;
-      static uint8_t ena_state = 1U;  /* 1 = HIGH(비활성) */
-      ena_state ^= 1U;
-      HAL_GPIO_WritePin(STEPPER_ENA_GPIO_Port, STEPPER_ENA_Pin,
-                        ena_state ? GPIO_PIN_SET : GPIO_PIN_RESET);
-      printf("[DBG] ENA -> %s  (모터 축을 손으로 돌려보세요)\r\n",
-             ena_state ? "HIGH(비활성)" : "LOW(활성-홀딩)");
-      osDelay(10U);
-      continue;
-    }
-
-    if (cmd == 'p' || cmd == 'P')
-    {
-      uart_rx_buf = 0;
-      printf("[DBG] Single pulse: ENA LOW -> PUL HIGH 5ms -> LOW\r\n");
-      HAL_GPIO_WritePin(STEPPER_ENA_GPIO_Port, STEPPER_ENA_Pin, GPIO_PIN_RESET);
-      osDelay(10U);
-      HAL_GPIO_WritePin(STEPPER_PUL_GPIO_Port, STEPPER_PUL_Pin, GPIO_PIN_SET);
-      osDelay(5U);
-      HAL_GPIO_WritePin(STEPPER_PUL_GPIO_Port, STEPPER_PUL_Pin, GPIO_PIN_RESET);
-      printf("[DBG] Pulse sent. Did you hear a click?\r\n");
-      osDelay(10U);
-      continue;
-    }
-
-    /* ── 센서 / UART 디스펜스 트리거 ───────────────────────── */
+    /* ── 약통 감지 트리거 ──────────────────────────────────── */
     GPIO_PinState pill_now     = HAL_GPIO_ReadPin(SENSOR_PILL_GPIO_Port, SENSOR_PILL_Pin);
     uint8_t       pill_falling = (pill_now == GPIO_PIN_RESET && prev_pill_sensor == GPIO_PIN_SET);
     uint8_t       sem_pending  = (osSemaphoreAcquire(sem_pill_trigger, 0U) == osOK);
-    uint8_t       uart_trig    = (osSemaphoreAcquire(sem_uart_trigger, 0U) == osOK);
     uint8_t       sensor_trig  = 0U;
 
     /* 재무장 전에는 센서 트리거 무시, FALLING 엣지 + LOW일 때만 1회 인정 */
@@ -669,63 +616,73 @@ void StartDefaultTask(void *argument)
     else if (sem_pending)
       PillSensor_DrainPending();
 
-    if (sensor_trig || uart_trig)
+    if (sensor_trig)
     {
       /* ── 약통 정보 dequeue (최대 200ms 대기) ─────────────────── */
+      static uint8_t s_last_seq  = 0U;
+      static uint8_t s_have_last = 0U;
+
       ContainerInfo info = { .seq = 0U, .color = '?' };
-      if (osMessageQueueGet(containerQueue, &info, NULL, 200U) == osOK)
+      if (osMessageQueueGet(containerQueue, &info, NULL, CONTAINER_QUEUE_WAIT_MS) == osOK)
       {
         uint32_t cnt = osMessageQueueGetCount(containerQueue);
-        printf("[Q:containerQueue] pop  seq=%u color=%c  [remain %lu]\r\n",
+        printf("[처리] 약통 확인 (번호 %u, 색상 %c) — 대기 %lu개\r\n",
                info.seq, info.color, (unsigned long)cnt);
+        Seq_CheckContinuity("[처리]", info.seq, &s_last_seq, &s_have_last);
       }
-      printf("[PILL] Container seq=%u color=%c\r\n", info.seq, info.color);
 
       if (sensor_trig)
         pill_armed = 0U;
 
-      /* ── CAN: 1번 보드 벨트 정지 요청 ──────────────────────── */
-      MCP2515_CanMsg can_msg = {
-        .id       = CAN_ID_2ND_TX,
-        .dlc      = 1U,
-        .data     = {CAN_CMD_BELT_STOP},
-        .extended = false,
-      };
-      HAL_StatusTypeDef tx_st = Belt_SendStop(&can_msg);
-      if (tx_st == HAL_OK)
-        printf("[CAN] Belt STOP sent\r\n");
+      if (info.color == 'N')
+      {
+        /* NG: 알약 미투입. 벨트 정지 없이 그대로 통과시켜 불량 배출로 흘려보냄 */
+        printf("[처리] 불량 약통 — 알약 투입 건너뛰고 그대로 통과\r\n");
+      }
       else
-        printf("[CAN] Belt STOP FAILED (TX error)\r\n");
-      osDelay(200U);  /* 1번 보드가 벨트를 정지할 시간 확보 */
+      {
+        /* ── CAN: 1번 보드 벨트 정지 요청 ──────────────────────── */
+        MCP2515_CanMsg can_msg = {
+          .id       = CAN_ID_2ND_TX,
+          .dlc      = 1U,
+          .data     = {CAN_CMD_BELT_STOP},
+          .extended = false,
+        };
+        HAL_StatusTypeDef tx_st = Belt_SendStop(&can_msg);
+        if (tx_st == HAL_OK)
+          printf("[벨트] 정지 요청 전송 (알약 투입 준비)\r\n");
+        else
+          printf("[벨트] 정지 요청 전송 실패\r\n");
+        osDelay(BELT_STOP_SETTLE_MS);
 
-      HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
+        HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
 
-      /* ── 알약 2정 투입 ───────────────────────────────────────── */
-      Dispense_Once();
-      printf("[PILL] Pill 1 dispensed\r\n");
+        for (uint8_t pill_i = 0U; pill_i < PILLS_PER_BOTTLE; pill_i++)
+        {
+          if (pill_i > 0U)
+            osDelay(PILL_INTERVAL_MS);
+          Dispense_Once();
+          printf("[투입] 알약 %u정 투입 완료\r\n", (unsigned)(pill_i + 1U));
+        }
 
-      osDelay(500U);  /* 알약 간격 */
+        HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(STEPPER_ENA_GPIO_Port, STEPPER_ENA_Pin, GPIO_PIN_SET);  /* 모터 비활성 */
 
-      Dispense_Once();
-      printf("[PILL] Pill 2 dispensed\r\n");
+        osDelay(POST_DISPENSE_MS);
 
-      HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
-      HAL_GPIO_WritePin(STEPPER_ENA_GPIO_Port, STEPPER_ENA_Pin, GPIO_PIN_SET);  /* 모터 비활성 */
-
-      osDelay(500U);  /* 알약 투입 완료 후 벨트 재개 전 안정화 대기 */
-
-      /* ── CAN: STOP을 보낸 경우에만 RESUME 1회 전송 ─────────── */
-      tx_st = Belt_SendResume(&can_msg);
-      if (tx_st == HAL_OK)
-        printf("[CAN] Belt RESUME sent\r\n");
-      else if (tx_st == HAL_BUSY)
-        printf("[CAN] Belt RESUME skipped (no prior STOP)\r\n");
-      else
-        printf("[CAN] Belt RESUME FAILED (TX error)\r\n");
+        /* ── CAN: STOP을 보낸 경우에만 RESUME 1회 전송 ─────────── */
+        tx_st = Belt_SendResume(&can_msg);
+        if (tx_st == HAL_OK)
+          printf("[벨트] 재가동 요청 전송 (투입 완료)\r\n");
+        else if (tx_st == HAL_BUSY)
+          printf("[벨트] 재가동 요청 생략 (정지한 적 없음)\r\n");
+        else
+          printf("[벨트] 재가동 요청 전송 실패\r\n");
+      }
 
       if (sensor_trig)
       {
-        PillSensor_WaitClearAndRearm(500U);
+        PillSensor_WaitClearAndRearm(PILL_SENSOR_REARM_MS);
         pill_armed = 1U;
       }
     }
