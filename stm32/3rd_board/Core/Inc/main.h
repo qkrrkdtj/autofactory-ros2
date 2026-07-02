@@ -62,6 +62,13 @@ typedef struct
 #define CAN_COLOR_RED        'R'     /* 빨간 약통 (정상) */
 #define CAN_COLOR_BLUE       'B'     /* 파란 약통 (정상) */
 #define CAN_COLOR_NG         'N'     /* 불량 */
+/* 2번 보드 → 1번 보드 CAN 벨트 제어 (3번 보드는 수신만, 처리 안 함) */
+#define CAN_ID_2ND_TX           0x102U
+
+/* 3번 보드 → 1번 보드 CAN 역압력 프로토콜
+ * 공정1 완료 시 전송 → 1번 보드가 다음 약통 투입을 허가받음 */
+#define CAN_ID_3RD_TX           0x103U
+#define CAN_CMD_SLOT_AVAILABLE  0x20U
 /* USER CODE END EC */
 
 /* Exported macro ------------------------------------------------------------*/
