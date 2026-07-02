@@ -149,6 +149,19 @@
     .legend {
       display: flex; gap: 20px; justify-content: center; margin-top: 10px; font-size: 13px; font-weight: 600;
     }
+
+    /* ─── 상단 탭바 ─── */
+    .tabbar { max-width: 1400px; margin: 0 auto 20px; display: flex; gap: 10px; }
+    .tab {
+      display: inline-flex; align-items: center; gap: 7px;
+      padding: 11px 18px; border-radius: var(--radius-sm);
+      border: 1px solid var(--border); background: var(--surface);
+      color: var(--text-muted); font-size: 14px; font-weight: 600;
+      text-decoration: none; transition: .15s;
+    }
+    .tab i { font-size: 16px; }
+    .tab:hover { color: var(--text); border-color: #475569; }
+    .tab.active { color: var(--amber); border-color: var(--amber-border); background: var(--amber-bg); }
   </style>
 </head>
 <body>
@@ -157,6 +170,11 @@
   <div id="battery-alert">
     <i class="ti ti-battery-exclamation" style="font-size:18px;"></i>
     <span id="alert-msg">배터리 부족!</span>
+  </div>
+
+  <div class="tabbar">
+    <a class="tab active" href="/"><i class="ti ti-radar-2"></i> 실시간 관제</a>
+    <a class="tab" href="/stats"><i class="ti ti-chart-bar"></i> 공정 통계</a>
   </div>
 
   <div class="layout-wrapper">
@@ -420,8 +438,9 @@
   };
   evtSource.onerror = function () {};
 
+  let logSource = null;
   function connectLogStream() {
-    const logSource = new EventSource('/log_stream');
+    logSource = new EventSource('/log_stream');
     logSource.onmessage = function (e) {
       try { const entry = JSON.parse(e.data); addLog(entry.msg, entry.level); } catch (_) {}
     };
@@ -432,7 +451,50 @@
   }
 
   addLog('시스템 초기화 완료. 로봇 구동 대기 중', 'info');
-  updateUI();
+
+  // 서버의 현재 미션 상태로 UI 복원 (탭 이동/새로고침 후 동기화)
+  async function initFromServer() {
+    try {
+      const res = await fetch('/state');
+      if (!res.ok) throw new Error();
+      const s = await res.json();
+
+      state.selected[0] = (s.selected || []).includes(1);
+      state.selected[1] = (s.selected || []).includes(2);
+      state.keepout[0]  = !!(s.ready && s.ready['1']);
+      state.keepout[1]  = !!(s.ready && s.ready['2']);
+      state.running     = !!s.started;
+      state.paused      = !!s.paused;
+
+      // 로봇 카드 DOM 반영
+      [1, 2].forEach(function (idx) {
+        const i = idx - 1;
+        const card = document.getElementById('card-' + idx);
+        const dot = document.getElementById('dot-' + idx);
+        const statusEl = document.getElementById('rstatus-' + idx);
+        if (state.selected[i]) {
+          card.classList.add('selected');
+          if (state.keepout[i]) { dot.className = 'dot ready'; statusEl.textContent = '준비 완료'; }
+          else                  { dot.className = 'dot waiting'; statusEl.textContent = '구동 대기 중'; }
+        } else {
+          card.classList.remove('selected');
+          dot.className = 'dot off';
+          statusEl.textContent = '비활성화됨';
+        }
+      });
+
+      // 미션 실행 중이면 외부신호 버튼 활성화 + 로그 스트림 재연결
+      if (state.running) {
+        document.querySelectorAll('#btn-a, #btn-c').forEach(function (b) { b.disabled = false; });
+        connectLogStream();
+      }
+    } catch (e) {
+      // 서버 상태 못 받으면 기본값 유지
+    }
+    updateUI();
+  }
+
+  initFromServer();
 
   // ==========================================
   // 배터리 스트림
@@ -583,6 +645,15 @@
           console.error("Pose 파싱 에러:", e);
       }
   };
+
+  // ==========================================
+  // 페이지 이탈 시 SSE 연결 정리 (탭 이동 시 연결 누적 방지)
+  // ==========================================
+  window.addEventListener('pagehide', function () {
+    [evtSource, poseSource, batterySource, logSource].forEach(function (s) {
+      try { if (s) s.close(); } catch (_) {}
+    });
+  });
 </script>
 </body>
 </html>

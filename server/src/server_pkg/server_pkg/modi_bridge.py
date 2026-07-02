@@ -404,7 +404,8 @@ def main(args=None):
         shared_pose_state, shared_battery_state,
     )
     flask_thread = threading.Thread(
-        target=lambda: flask_app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False),
+        target=lambda: flask_app.run(host='0.0.0.0', port=5000, debug=False,
+                                 use_reloader=False, threaded=True),
         daemon=True
     )
     flask_thread.start()

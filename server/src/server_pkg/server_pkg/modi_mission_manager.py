@@ -1,6 +1,8 @@
 import asyncio
 import threading
 import queue
+import time
+from server_pkg import stats_db   # 공정 로그 DB (server_pkg 패키지 내부 모듈)
 from rclpy.action import ActionClient
 from nav2_msgs.action import NavigateToPose
 from action_msgs.msg import GoalStatus
@@ -252,6 +254,7 @@ class MissionManager:
             self.robot2_first_run = False
 
             self.robot_target[robot_id] = "E'"
+            leg_start = time.time()          # ← Start → E 전체 소요시간 측정 시작
             self.push_log("🤖 Waffle 2: Start → E' 이동 시작", 'info')
             self.server_node.get_logger().info(f'[{robot_id}] Start → E\'  이동 시작')
             while True:
@@ -282,6 +285,12 @@ class MissionManager:
             self.robot_target[robot_id] = None
             self.push_log("✅ Waffle 2: E 도착 — 순환 루프 시작", 'success')
             self.server_node.get_logger().info(f'[{robot_id}] E 도착 — 순환 루프 시작')
+            # Start → E' → E 를 하나로 묶어서 기록
+            try:
+                stats_db.insert_cycle_log('Waffle 2', 'Start구역 → E구역',
+                                          round(time.time() - leg_start, 1), '성공')
+            except Exception as e:
+                self.server_node.get_logger().warn(f'[{robot_id}] 공정 로그 저장 실패: {e}')
 
             self.robot_step[robot_id] = 0
 
@@ -306,6 +315,7 @@ class MissionManager:
             await self.wait_if_paused()
             rname = 'Waffle 1' if robot_id == 'robot1' else 'Waffle 2'
             prev_wp = self.robot_current.get(robot_id) or 'Start'
+            leg_start = time.time()          # ← 공정 소요시간 측정 시작
             self.push_log(f'🤖 {rname}: {prev_wp} → {next_wp} 이동 시작', 'info')
 
             success = await self.send_and_wait(
@@ -354,6 +364,14 @@ class MissionManager:
             # ── 조건 3: A 또는 C 도착 시 OMX 정책 실행 ──
             if next_wp in ['A', 'C']:
                 await self._run_omx_and_wait(robot_id, next_wp)
+
+            # ── 공정 1건 완료 → DB 기록 ──
+            elapsed = round(time.time() - leg_start, 1)
+            path_str = f'{prev_wp}구역 → {next_wp}구역'
+            try:
+                stats_db.insert_cycle_log(rname, path_str, elapsed, '성공')
+            except Exception as e:
+                self.server_node.get_logger().warn(f'[{robot_id}] 공정 로그 저장 실패: {e}')
 
             # ── 스텝 증가 ──
             self.robot_step[robot_id] += 1
