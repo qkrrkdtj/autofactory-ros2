@@ -60,6 +60,13 @@ typedef struct
 #define PI_RSP_LOG_SIZE       16U
 #define SENSOR_REARM_DELAY_MS 500U
 
+/* 약통 투입·비전 검사 타이밍 (ms) — 현장 튜닝 시 이 값만 수정 */
+#define ACT1_FORWARD_MS           8000U  /* 액추에이터1 전진 유지 시간 */
+#define START_SENSOR_DEBOUNCE_MS    20U  /* PA9 공급 센서 채터링 방지 재확인 */
+#define START_SENSOR_HOLD_MS      1000U  /* PA9 감지 후 약통 안착 대기 */
+#define VISION_STABILIZE_MS        500U  /* 비전 검사 전 카메라 안정화 대기 */
+#define POST_VISION_BELT_MS        500U  /* 비전 검사 후 약통 밀어주기 시간 */
+
 /* 1번 보드 → 전체 CAN 약통 정보 브로드캐스트 (0x101) */
 #define CAN_ID_1ST_TX        0x101U
 #define CAN_MSG_CONTAINER    0x01U   /* data[0] 메시지 타입 */
@@ -71,6 +78,11 @@ typedef struct
 #define CAN_ID_2ND_TX        0x102U
 #define CAN_CMD_BELT_STOP    0x10U  /* 벨트 정지 요청 */
 #define CAN_CMD_BELT_RESUME  0x11U  /* 벨트 재개 요청 */
+
+/* 3번 보드 → 1번 보드 CAN 역압력 프로토콜
+ * 3번 보드 공정1 완료 시 전송 → 1번 보드가 다음 약통 투입을 허가받음 */
+#define CAN_ID_3RD_TX           0x103U
+#define CAN_CMD_SLOT_AVAILABLE  0x20U
 /* USER CODE END EC */
 
 /* Exported macro ------------------------------------------------------------*/

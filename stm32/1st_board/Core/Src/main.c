@@ -67,7 +67,12 @@ osMutexId_t piRspMutex;
 osMutexId_t canMutex;         /* MCP2515 SPI 동시 접근 방지 */
 osSemaphoreId_t sem_can_int;  /* MCP2515 INT 핀 낙하 → CanRxTask 즉시 기상 */
 
-volatile bool g_belt_ext_stop = false;  /* 2번 보드 벨트 정지 요청 플래그 */
+volatile bool    g_belt_ext_stop    = false;  /* 2번 보드 벨트 정지 요청 플래그 */
+
+/* 3번 보드 공정1 완료 시 SLOT_AVAILABLE CAN 수신 → 증가.
+ * IDLE→FORWARD 진입은 슬롯>0일 때만 허용, 슬롯 소비는 CAN 전송(HandleObstacleDetected) 시점. */
+#define MAX_3RD_BOARD_SLOTS  2U
+volatile uint8_t g_3rd_board_slots = 1U;  /* 초기값 1: 첫 약통은 즉시 투입 허용 */
 
 static volatile bool     g_sensor_monitoring = false;
 static volatile bool     g_sensor_triggered  = false;
@@ -217,7 +222,7 @@ static void HandleObstacleDetected(void)
   uint8_t can_color = CAN_COLOR_NG;
 
   HAL_StatusTypeDef rx_status;
-  osDelay(500U);  /* 벨트 정지 후 카메라 안정화 대기 */
+  osDelay(VISION_STABILIZE_MS);
   PiUart_FlushRx();
 
   HAL_UART_Transmit(&huart2, &tx_byte, 1U, HAL_MAX_DELAY);
@@ -246,6 +251,10 @@ static void HandleObstacleDetected(void)
   osMutexAcquire(canMutex, osWaitForever);
   (void)MCP2515_Send(&hmcp2515, &can_tx);
   osMutexRelease(canMutex);
+
+  /* 3번 보드 파이프라인에 진입 — 슬롯 1개 소비 (CAN 전송 시점) */
+  if (g_3rd_board_slots > 0U)
+    g_3rd_board_slots--;
 }
 
 /* Belt state machine.
@@ -264,7 +273,7 @@ static void BeltTask(void *argument)
 {
   (void)argument;
 
-  const uint32_t forward_ms = 8000U;
+  const uint32_t forward_ms = ACT1_FORWARD_MS;
 
   uint8_t  current_stage    = MACHINE_STAGE_IDLE;
   uint32_t stage_start_tick = osKernelGetTickCount();
@@ -291,7 +300,7 @@ static void BeltTask(void *argument)
 
         /* 약통을 다음 공정으로 이동: 0.5초 가동 후 IDLE 복귀 */
         Belt_SetRelay(true);
-        osDelay(500U);
+        osDelay(POST_VISION_BELT_MS);
         Belt_SetRelay(false);
 
         current_stage = MACHINE_STAGE_IDLE;
@@ -311,16 +320,20 @@ static void BeltTask(void *argument)
       case MACHINE_STAGE_IDLE:
         SensorMonitoring_Disable();
 
+        /* 3번 보드 수용 가능 슬롯이 없으면 새 약통 투입 보류 */
+        if (g_3rd_board_slots == 0U)
+          break;
+
         /* PA9 적외선 센서 감지 상태 확인 */
         if (ReadStartSensor() == true)
         {
           /* 채터링 노이즈 방지를 위해 20ms 후 재확인 */
-          osDelay(20U);
+          osDelay(START_SENSOR_DEBOUNCE_MS);
           if (ReadStartSensor() == true)
           {
-            osDelay(1000U);
+            osDelay(START_SENSOR_HOLD_MS);
 
-            /* 액추에이터 전진과 동시에 비전 센서 무장 */
+            /* 액추에이터 전진과 동시에 비전 센서 무장 (슬롯은 CAN 전송 시 소비) */
             current_stage    = MACHINE_STAGE_FORWARD;
             stage_start_tick = osKernelGetTickCount();
             sensor_active    = true;
@@ -695,26 +708,42 @@ static void CanRxTask(void *argument)
   {
     osSemaphoreAcquire(sem_can_int, 100U);
 
-    osMutexAcquire(canMutex, osWaitForever);
-    HAL_StatusTypeDef st = MCP2515_Receive(&hmcp2515, &rx, 1U);
-    osMutexRelease(canMutex);
-
-    if (st == HAL_OK && rx.id == CAN_ID_2ND_TX && rx.dlc >= 1U)
+    /* INT 1회에 버퍼에 쌓인 CAN 프레임을 모두 처리 */
+    for (;;)
     {
-      if (rx.data[0] == CAN_CMD_BELT_STOP)
-      {
-        g_belt_ext_stop = true;
-        HAL_GPIO_WritePin(RELAY_GPIO_Port, RELAY_Pin, GPIO_PIN_RESET);
-      }
-      else if (rx.data[0] == CAN_CMD_BELT_RESUME)
-      {
-        if (!g_belt_ext_stop)
-          continue;
+      osMutexAcquire(canMutex, osWaitForever);
+      HAL_StatusTypeDef st = MCP2515_Receive(&hmcp2515, &rx, 1U);
+      osMutexRelease(canMutex);
 
-        g_belt_ext_stop = false;
-        /* 비전 검사 중이 아니면 즉시 벨트 재개 */
-        if (!g_sensor_triggered)
-          HAL_GPIO_WritePin(RELAY_GPIO_Port, RELAY_Pin, GPIO_PIN_SET);
+      if (st != HAL_OK || rx.dlc < 1U)
+        break;
+
+      if (rx.id == CAN_ID_2ND_TX)
+      {
+        if (rx.data[0] == CAN_CMD_BELT_STOP)
+        {
+          g_belt_ext_stop = true;
+          HAL_GPIO_WritePin(RELAY_GPIO_Port, RELAY_Pin, GPIO_PIN_RESET);
+        }
+        else if (rx.data[0] == CAN_CMD_BELT_RESUME)
+        {
+          if (!g_belt_ext_stop)
+            continue;
+
+          g_belt_ext_stop = false;
+          /* 비전 검사 중이 아니면 즉시 벨트 재개 */
+          if (!g_sensor_triggered)
+            HAL_GPIO_WritePin(RELAY_GPIO_Port, RELAY_Pin, GPIO_PIN_SET);
+        }
+      }
+      else if (rx.id == CAN_ID_3RD_TX)
+      {
+        /* 3번 보드 공정 완료 신호 — 슬롯 1개 반환 */
+        if (rx.data[0] == CAN_CMD_SLOT_AVAILABLE)
+        {
+          if (g_3rd_board_slots < MAX_3RD_BOARD_SLOTS)
+            g_3rd_board_slots++;
+        }
       }
     }
   }
