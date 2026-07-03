@@ -95,9 +95,18 @@ def get_logs(limit=50, robot=None, status=None):
     out = []
     for r in rows:
         ts = r['completed_at']
+        
+        # 'T'를 기준으로 날짜와 시간을 분리
+        if 'T' in ts:
+            date_val, time_val = ts.split('T')
+        else:
+            date_val = ts[:10] if len(ts) >= 10 else ''
+            time_val = ts[11:19] if len(ts) >= 19 else ts
+
         out.append({
             'id':       r['id'],
-            'time':     ts[11:19] if len(ts) >= 19 else ts,  # HH:MM:SS
+            'date':     date_val,  # 분리한 날짜
+            'time':     time_val,  # 분리한 시간
             'robot':    r['robot'],
             'path':     r['path'],
             'duration': r['duration'],

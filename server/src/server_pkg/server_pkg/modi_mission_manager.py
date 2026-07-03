@@ -322,7 +322,8 @@ class MissionManager:
                 client,
                 *self.WAYPOINTS[next_wp],
                 wp_name=next_wp,          # ← 웨이포인트 이름 전달
-                label=f'{robot_id}→{next_wp}'
+                label=f'{robot_id}→{next_wp}',
+                robot_id=robot_id,
             )
 
             if success is None:
@@ -360,7 +361,7 @@ class MissionManager:
                     )
                     await asyncio.sleep(0.5)
                 self.server_node.get_logger().info(f'[{robot_id}] C/D 확보 확인 — B 통과!')
-
+                
             # ── 조건 3: A 또는 C 도착 시 OMX 정책 실행 ──
             if next_wp in ['A', 'C']:
                 await self._run_omx_and_wait(robot_id, next_wp)
@@ -403,14 +404,14 @@ class MissionManager:
         goal.pose.pose.orientation.w = ow
         return goal
 
-    async def send_and_wait(self, client, x, y, oz, ow, wp_name='', label=''):
+    async def send_and_wait(self, client, x, y, oz, ow, wp_name='', label='', robot_id=None):
         """
         이동 명령을 보내고 결과를 기다린다.
         - wp_name: 현재 목표 웨이포인트 이름 → shared_state['current_wp']에 세팅
         - pause 감지 시 None 반환, 성공 True, 실패 False
         """
-        # ── [핵심] 출발 전에 현재 목표 웨이포인트를 shared_state에 기록 ──
-        self.shared_state['current_wp'] = wp_name
+        rid = 1 if robot_id == 'robot1' else 2
+        self.shared_state.setdefault('current_wp', {})[rid] = wp_name   # 기존 413줄 교체
 
         future = client.send_goal_async(self.make_goal(x, y, oz, ow))
         while not future.done():
