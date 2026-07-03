@@ -92,11 +92,12 @@ class OmxExecutorServer:
         self.tray_camera_key = self.cfg.get("tray_camera_key", "observation.images.wrist")
         self.depart_target_count = self.cfg.get("depart_target_count", 0)
 
-        # ── home 도달 판정에서 제외할 관절 (omx별로 다름) ──
-        # config에 없으면 gripper만 제외(기존 동작과 동일).
-        self.home_ignore_keys = set(
-            self.cfg.get("home_ignore_keys", ["gripper.pos"])
-        )
+        # home 도달 판정에서 제외할 관절
+        # omx2는 원점 복귀 시 좌우(shoulder_pan)가 약간 돌아가 있어도 인정.
+        if self.omx_id == "omx2":
+            self._home_ignore = {"gripper.pos", "shoulder_pan.pos"}
+        else:
+            self._home_ignore = {"gripper.pos"}
 
         # ── 출발 검증용 OpenCV 카운터 선택 (omx별 독립 파일/튜닝) ──
         # omx1(적재/A): box_counter1.count_in_tray  (트레이 3개 차면 출발)
@@ -487,9 +488,9 @@ class OmxExecutorServer:
     # HOME_IGNORE_KEYS = {"gripper.pos"}
 
     # @classmethod
-    def _is_at_home(cls, obs: dict, home_position: dict) -> bool:
+    def _is_at_home(self, obs: dict, home_position: dict) -> bool:
         for key, target in home_position.items():
-            if key in cls.HOME_IGNORE_KEYS:
+            if key in self._home_ignore:
                 continue
             current = obs.get(key)
             if current is None:
