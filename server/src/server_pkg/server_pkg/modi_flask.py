@@ -4,6 +4,9 @@ import time
 import threading
 
 from flask import Flask, request, jsonify
+from ament_index_python.packages import get_package_share_directory
+
+from server_pkg import stats_db
 
 
 # ==========================================
@@ -18,14 +21,55 @@ def create_flask_app(
     shared_pose_state: dict,
     shared_battery_state: dict,
 ):
-    app = Flask(__name__, static_folder='static')
+    
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    html_dir = os.path.join(BASE_DIR, 'html')   
+    static_dir = os.path.join(BASE_DIR, 'static')
 
-    # ── 대시보드 메인 페이지 ──
+    app = Flask(__name__,
+            static_folder=static_dir,
+            static_url_path='/static')
+
+    # DB 초기화 (테이블 없으면 생성)
+    stats_db.init_db()
+
+    # ── 대시보드 메인 페이지 (실시간 관제) ──
     @app.route('/')
     def index():
-        html_path = os.path.join(os.path.dirname(__file__), 'dashboard.html')
-        with open(html_path, 'r', encoding='utf-8') as f:
+        with open(os.path.join(html_dir, 'dashboard.html'), 'r', encoding='utf-8') as f:
             return f.read()
+
+    # ── 공정 통계 페이지 ──
+    @app.route('/stats')
+    def stats_page():
+        with open(os.path.join(html_dir, 'stats.html'), 'r', encoding='utf-8') as f:
+            return f.read()
+
+    # ── 통계 요약 API ──
+    @app.route('/api/stats/summary')
+    def api_stats_summary():
+        return jsonify(stats_db.get_summary())
+
+    # ── 공정 이력 API (robot/status/limit 필터) ──
+    @app.route('/api/stats/logs')
+    def api_stats_logs():
+        robot  = request.args.get('robot')  or None
+        status = request.args.get('status') or None
+        limit  = request.args.get('limit', default=50, type=int)
+        return jsonify(stats_db.get_logs(limit=limit, robot=robot, status=status))
+
+    # ── 현재 미션 상태 조회 (페이지 로드 시 UI 복원용) ──
+    @app.route('/state')
+    def get_state():
+        return jsonify({
+            'started':  shared_state.get('started', False),
+            'paused':   shared_state.get('paused', False),
+            'selected': shared_state.get('selected', [1, 2]),
+            'ready': {
+                '1': robot_ready_events[1].is_set(),
+                '2': robot_ready_events[2].is_set(),
+            },
+        })
 
     # ── keepout 준비 완료 SSE ──
     @app.route('/ready_stream')

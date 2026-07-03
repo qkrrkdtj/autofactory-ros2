@@ -92,6 +92,13 @@ class OmxExecutorServer:
         self.tray_camera_key = self.cfg.get("tray_camera_key", "observation.images.wrist")
         self.depart_target_count = self.cfg.get("depart_target_count", 0)
 
+        # home 도달 판정에서 제외할 관절
+        # omx2는 원점 복귀 시 좌우(shoulder_pan)가 약간 돌아가 있어도 인정.
+        if self.omx_id == "omx2":
+            self._home_ignore = {"gripper.pos", "shoulder_pan.pos"}
+        else:
+            self._home_ignore = {"gripper.pos"}
+
         # ── 출발 검증용 OpenCV 카운터 선택 (omx별 독립 파일/튜닝) ──
         # omx1(적재/A): box_counter1.count_in_tray  (트레이 3개 차면 출발)
         # omx2(분류/C): box_counter.count_in_tray   (트레이 비면 출발)
@@ -107,22 +114,22 @@ class OmxExecutorServer:
         #   override 에 넣으면 draccus 파싱이 터진다 → device 만 cuda 로 지정.
         # omx2(분류/C): Diffusion 정책. noise_scheduler_type / num_inference_steps 는 모델
         #   __init__ 에서 스케줄러를 만들 때 읽히므로 반드시 from_pretrained 전에 주입해야 한다.
-        if self.omx_id == "omx1":
+        if self.omx_id == "omx1" or self.omx_id == "omx2":
             self._policy_class = ACTPolicy
             self._policy_overrides = [
                 "--device=cuda",
             ]
             self._use_amp = False
-        else:
-            self._policy_class = DiffusionPolicy
-            self._policy_overrides = [
-                "--device=cuda",
-                "--use_amp=true",
-                "--noise_scheduler_type=DDIM",
-                "--num_inference_steps=10",
-                "--n_action_steps=15",
-            ]
-            self._use_amp = True
+        # else:
+        #     self._policy_class = DiffusionPolicy
+        #     self._policy_overrides = [
+        #         "--device=cuda",
+        #         "--use_amp=true",
+        #         "--noise_scheduler_type=DDIM",
+        #         "--num_inference_steps=10",
+        #         "--n_action_steps=15",
+        #     ]
+        #     self._use_amp = True
 
     # ------------------------------------------------------------------
     # 초기화: 로봇 연결 + 정책/전처리기/후처리기 로드 (서버 시작 시 한 번만)
@@ -478,12 +485,12 @@ class OmxExecutorServer:
         print(f"[{self.omx_id}] Home 복귀 타임아웃 ({HOMING_TIMEOUT}초)")
         return False
 
-    HOME_IGNORE_KEYS = {"gripper.pos"}
+    # HOME_IGNORE_KEYS = {"gripper.pos"}
 
-    @classmethod
-    def _is_at_home(cls, obs: dict, home_position: dict) -> bool:
+    # @classmethod
+    def _is_at_home(self, obs: dict, home_position: dict) -> bool:
         for key, target in home_position.items():
-            if key in cls.HOME_IGNORE_KEYS:
+            if key in self._home_ignore:
                 continue
             current = obs.get(key)
             if current is None:

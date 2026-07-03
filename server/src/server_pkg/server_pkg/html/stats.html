@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>공정 통계 — AutoFactory</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0f172a; --surface: #1e293b; --surface2: #273348; --border: #334155;
+      --text: #e2e8f0; --text-muted: #94a3b8; --text-faint: #64748b;
+      --blue: #38bdf8; --blue-bg: rgba(56,189,248,0.08); --blue-border: rgba(56,189,248,0.3);
+      --green: #4ade80; --green-bg: rgba(74,222,128,0.08); --green-border: rgba(74,222,128,0.3);
+      --amber: #fbbf24; --amber-bg: rgba(251,191,36,0.08); --amber-border: rgba(251,191,36,0.3);
+      --red: #f87171; --red-bg: rgba(248,113,113,0.08); --red-border: rgba(248,113,113,0.3);
+      --radius: 10px; --radius-sm: 6px;
+    }
+    body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; padding: 32px 16px; }
+    .wrap { max-width: 1400px; margin: 0 auto; }
+
+    /* ─── 탭바 ─── */
+    .tabbar { display: flex; gap: 10px; margin-bottom: 24px; }
+    .tab {
+      display: inline-flex; align-items: center; gap: 7px;
+      padding: 11px 18px; border-radius: var(--radius-sm);
+      border: 1px solid var(--border); background: var(--surface);
+      color: var(--text-muted); font-size: 14px; font-weight: 600;
+      text-decoration: none; transition: .15s;
+    }
+    .tab i { font-size: 16px; }
+    .tab:hover { color: var(--text); border-color: #475569; }
+    .tab.active { color: var(--amber); border-color: var(--amber-border); background: var(--amber-bg); }
+
+    /* ─── 통계 카드 ─── */
+    .stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin-bottom: 24px; }
+    .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px 22px; }
+    .stat-label { font-size: 13px; color: var(--text-muted); margin-bottom: 12px; }
+    .stat-value { font-size: 38px; font-weight: 800; line-height: 1; }
+    .stat-unit  { font-size: 15px; color: var(--text-muted); font-weight: 500; margin-left: 6px; }
+    .c-blue  { color: var(--blue); }
+    .c-red   { color: var(--red); }
+    .c-green { color: var(--green); }
+
+    /* ─── 테이블 패널 ─── */
+    .panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px 22px; }
+    .panel-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; gap: 12px; flex-wrap: wrap; }
+    .panel-title { font-size: 10px; font-weight: 700; letter-spacing: 0.1em; color: var(--text-faint); text-transform: uppercase; }
+    .controls { display: flex; gap: 10px; align-items: center; }
+    select {
+      background: var(--surface2); color: var(--text);
+      border: 1px solid var(--border); border-radius: var(--radius-sm);
+      padding: 8px 12px; font-size: 13px; cursor: pointer;
+    }
+    .btn-csv {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: var(--surface2); color: var(--text);
+      border: 1px solid var(--border); border-radius: var(--radius-sm);
+      padding: 8px 14px; font-size: 13px; font-weight: 600; cursor: pointer; transition: .15s;
+    }
+    .btn-csv:hover { border-color: var(--blue-border); color: var(--blue); }
+
+    /* 테이블 컨테이너 및 스크롤 설정 */
+    .table-container {
+      max-height: 680px;
+      overflow-y: auto;
+      border-bottom: 1px solid var(--border);
+    }
+    
+    table { width: 100%; border-collapse: collapse; }
+    
+    /* 테이블 헤더 고정 */
+    thead th { 
+      position: sticky; 
+      top: 0; 
+      background: var(--surface); 
+      z-index: 10; 
+      text-align: left; 
+      font-size: 13px; 
+      font-weight: 600; 
+      color: var(--text-muted); 
+      padding: 14px 8px; 
+      border-bottom: 2px solid var(--border); 
+    }
+    
+    td { font-size: 14px; padding: 15px 8px; border-bottom: 1px solid var(--border); }
+    tr:last-child td { border-bottom: none; }
+    .log-id { color: var(--text-faint); }
+    .date-text { color: var(--text-muted); font-size: 13px; } /* 날짜 디자인 추가 */
+    .path { color: var(--text-muted); }
+    .robot { font-weight: 700; display: inline-flex; align-items: center; gap: 6px; }
+    .robot i { font-size: 15px; }
+    .robot.w1 { color: var(--blue); }
+    .robot.w2 { color: var(--red); }
+    .badge { display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+    .badge.ok  { color: var(--green); border: 1px solid var(--green-border); background: var(--green-bg); }
+    .badge.err { color: var(--amber); border: 1px solid var(--amber-border); background: var(--amber-bg); }
+    .empty { text-align: center; color: var(--text-faint); padding: 40px; }
+
+    .table-container::-webkit-scrollbar { width: 8px; }
+    .table-container::-webkit-scrollbar-track { background: var(--surface); }
+    .table-container::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+    .table-container::-webkit-scrollbar-thumb:hover { background: #475569; }
+
+    @media (max-width: 900px) { body { padding: 16px; } .stat-grid { grid-template-columns: repeat(2, 1fr); } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+
+    <div class="tabbar">
+      <a class="tab" href="/"><i class="ti ti-radar-2"></i> 실시간 관제</a>
+      <a class="tab active" href="/stats"><i class="ti ti-chart-bar"></i> 공정 통계</a>
+    </div>
+
+    <div class="stat-grid">
+      <div class="stat-card">
+        <div class="stat-label">금일 누적 사이클 (전체)</div>
+        <div class="stat-value c-blue"><span id="stat-total">0</span><span class="stat-unit">회</span></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Waffle 1 달성량</div>
+        <div class="stat-value c-blue"><span id="stat-w1">0</span><span class="stat-unit">회</span></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Waffle 2 달성량</div>
+        <div class="stat-value c-red"><span id="stat-w2">0</span><span class="stat-unit">회</span></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">평균 공정 소요 시간</div>
+        <div class="stat-value c-green"><span id="stat-avg">0</span><span class="stat-unit">초</span></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <div class="panel-title">최근 공정 완료 이력 (DB 데이터)</div>
+        <div class="controls">
+          <select id="filter-robot" onchange="loadLogs()">
+            <option value="">전체 로봇</option>
+            <option value="Waffle 1">Waffle 1</option>
+            <option value="Waffle 2">Waffle 2</option>
+          </select>
+          <select id="filter-status" onchange="loadLogs()">
+            <option value="">전체 상태</option>
+            <option value="성공">성공</option>
+            <option value="장애 정지">장애 정지</option>
+          </select>
+          <button class="btn-csv" onclick="downloadCSV()"><i class="ti ti-download"></i> CSV 다운로드</button>
+        </div>
+      </div>
+
+      <div class="table-container">
+        <table>
+          <thead>
+            <tr>
+              <!-- 날짜 컬럼(완료 날짜) 추가됨 -->
+              <th>Log ID</th><th>완료 날짜</th><th>완료 시간</th><th>로봇 명</th>
+              <th>작업 경로</th><th>소요 시간</th><th>상태</th>
+            </tr>
+          </thead>
+          <tbody id="log-body"></tbody>
+        </table>
+      </div>
+
+    </div>
+
+  </div>
+
+<script>
+  let logs = [];
+
+  async function loadSummary() {
+    try {
+      const r = await fetch('/api/stats/summary');
+      if (!r.ok) throw new Error();
+      applySummary(await r.json());
+    } catch (e) {
+      applySummary(DEMO.summary);
+    }
+  }
+
+  async function loadLogs() {
+    const robot  = document.getElementById('filter-robot').value;
+    const status = document.getElementById('filter-status').value;
+    const qs = new URLSearchParams();
+    if (robot)  qs.set('robot', robot);
+    if (status) qs.set('status', status);
+    try {
+      const r = await fetch('/api/stats/logs?' + qs.toString());
+      if (!r.ok) throw new Error();
+      logs = await r.json();
+    } catch (e) {
+      logs = DEMO.logs.filter(l => (!robot || l.robot === robot) && (!status || l.status === status));
+    }
+    renderTable();
+  }
+
+  function applySummary(s) {
+    document.getElementById('stat-total').textContent = s.total ?? 0;
+    document.getElementById('stat-w1').textContent    = s.waffle1 ?? 0;
+    document.getElementById('stat-w2').textContent    = s.waffle2 ?? 0;
+    document.getElementById('stat-avg').textContent   = s.avg ?? 0;
+  }
+
+  function renderTable() {
+    const body = document.getElementById('log-body');
+    
+    if (!logs.length) {
+      body.innerHTML = '<tr><td colspan="7" class="empty">표시할 이력이 없습니다.</td></tr>';
+      return;
+    }
+    
+    body.innerHTML = logs.map(l => {
+      const wClass = l.robot === 'Waffle 1' ? 'w1' : 'w2';
+      const badge  = l.status === '성공' ? 'ok' : 'err';
+      const dur    = (l.duration === null || l.duration === undefined) ? '--' : l.duration + '초';
+      const date   = l.date || '----'; // 파이썬이 보내준 date 바로 사용
+      
+      return `
+        <tr>
+          <td class="log-id">#${l.id}</td>
+          <td>${date}</td>
+          <td>${l.time}</td>
+          <td><span class="robot ${wClass}"><i class="ti ti-device-gamepad-2"></i> ${l.robot}</span></td>
+          <td class="path">${l.path}</td>
+          <td>${dur}</td>
+          <td><span class="badge ${badge}">${l.status}</span></td>
+        </tr>`;
+    }).join('');
+  }
+
+  function downloadCSV() {
+    const header = ['Log ID', '완료 날짜', '완료 시간', '로봇 명', '작업 경로', '소요 시간(초)', '상태'];
+    const lines = [header.join(',')];
+    
+    logs.forEach(l => {
+      const dur = (l.duration === null || l.duration === undefined) ? '' : l.duration;
+      const date = l.date || ''; // CSV 다운로드 시에도 바로 사용
+      
+      const cells = [`#${l.id}`, date, l.time, l.robot, l.path, dur, l.status]
+        .map(c => `"${String(c).replace(/"/g, '""')}"`);
+      lines.push(cells.join(','));
+    });
+    
+    const blob = new Blob(['\uFEFF' + lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `process_log_${new Date().toISOString().slice(0,10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  loadSummary();
+  loadLogs();
+</script>
+</body>
+</html>

@@ -33,6 +33,8 @@ OMX_CONFIGS = {
         },
         "depart_target_count": 3,                          # A: 3개 차면 출발
         "tray_camera_key": "observation.images.wrist",     # 트레이 보는 캠(cam_wrist)
+        # home 도달 판정에서 제외할 관절 (gripper는 사이클마다 값이 흔들려 제외)
+        "home_ignore_keys": ["gripper.pos"],
     },
     "omx2": {
         # ---- 네트워크 (관제서버 <-> OMX2 PC 통신) ----
@@ -40,12 +42,12 @@ OMX_CONFIGS = {
         "port": 9002,
 
         # ---- 역할 ----
-        "policy_name": "classify1_diffusion_ep0_496",   # 분류 정책 (로그/메시지용 짧은 이름)
+        "policy_name": "classify1_ep0_800",   # 분류 정책 (로그/메시지용 짧은 이름)
         "role": "sorting",
 
         # ---- 로봇 실행 관련 (OMX2 PC 로컬에서만 사용) ----
         "robot_port": "/dev/omx_follower",          # TODO: 실제 시리얼 포트 확인 필요 (OMX1과 PC가 다르면 보통 같은 경로명일 수 있음)
-        "policy_path": "angrynose/classify1_diffusion_ep0_496",   # HuggingFace repo_id (로컬 캐시 사용)
+        "policy_path": "angrynose/classify1_ep0_800",   # HuggingFace repo_id (로컬 캐시 사용)
         "dataset_repo_id": "angrynose/classify1",   # TODO: 실제 학습 데이터셋 repo_id 확인 필요 (train_config.json의 dataset.repo_id 값)
         "home_position": {
             "shoulder_pan.pos": -0.757,
@@ -61,6 +63,9 @@ OMX_CONFIGS = {
         },
         "depart_target_count": 0,                          # C: 트레이 비면 출발
         "tray_camera_key": "observation.images.wrist",     # 트레이 보는 캠(cam_wrist)
+        # 원점 복귀 시 좌우(shoulder_pan)가 약간 돌아가 있어도 home으로 인정.
+        # gripper와 함께 판정에서 제외한다.
+        "home_ignore_keys": ["gripper.pos", "shoulder_pan.pos"],
     },
 }
 

@@ -105,8 +105,11 @@ class ActionProxy:
         done.wait()
 
     def _p_correction_sync(self):
-        if self.shared_state.get('current_wp') not in ['A', 'C']:
+        my_wp = self.shared_state.get('current_wp', {}).get(self.robot_id)
+
+        if my_wp not in ['A','C','D']:
             return
+        
         if self.last_goal is None:
             return
 
@@ -179,7 +182,7 @@ class ActionProxy:
         # 누적 회전량 추적 (wrap 방지)
         prev = yaw0
         accumulated = 0.0
-        Kp, W_MAX, W_MIN = 1.5, 0.5, 0.12
+        Kp, W_MAX, W_MIN = 1.5, 0.5, 0.08
         start, dt = time.time(), 0.05
 
         while time.time()-start < 10.0 and not self._wants_pause:
@@ -192,7 +195,7 @@ class ActionProxy:
             prev = od['theta']
 
             rem = angle - accumulated      # 남은 회전량 (부호 유지)
-            if abs(rem) < 0.008:
+            if abs(rem) < 0.004:
                 break
             w = Kp*rem
             if abs(w) < W_MIN: w = math.copysign(W_MIN, w)
@@ -347,7 +350,8 @@ def main(args=None):
     shared_state = {
         'selected': [1, 2],
         'paused': False,
-        'started': False
+        'started': False,
+        'current_wp': {},
     }
     shared_pose_state    = {}  # { robot_id: {x, y, theta} }
     shared_battery_state = {}  # { robot_id: 퍼센트(float) }
@@ -404,7 +408,8 @@ def main(args=None):
         shared_pose_state, shared_battery_state,
     )
     flask_thread = threading.Thread(
-        target=lambda: flask_app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False),
+        target=lambda: flask_app.run(host='0.0.0.0', port=5000, debug=False,
+                                 use_reloader=False, threaded=True),
         daemon=True
     )
     flask_thread.start()
