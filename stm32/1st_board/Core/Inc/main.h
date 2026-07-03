@@ -115,8 +115,6 @@ bool ReadSensor(void);
 #define SWO_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
-#define B1_Pin             GPIO_PIN_13
-#define B1_GPIO_Port       GPIOC
 #define SENSOR_Pin         GPIO_PIN_1
 #define SENSOR_GPIO_Port   GPIOB
 #define RELAY_Pin          GPIO_PIN_10

@@ -103,13 +103,6 @@ void Error_Handler(void);
 #define MCP2515_CS_GPIO_Port GPIOA
 #define MCP2515_INT_Pin GPIO_PIN_0
 #define MCP2515_INT_GPIO_Port GPIOB
-#define SENSOR_Pin GPIO_PIN_1
-#define SENSOR_GPIO_Port GPIOB
-
-#define ACT1_IN1_Pin       GPIO_PIN_8
-#define ACT1_IN1_GPIO_Port GPIOB
-#define ACT1_IN2_Pin       GPIO_PIN_9
-#define ACT1_IN2_GPIO_Port GPIOB
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus

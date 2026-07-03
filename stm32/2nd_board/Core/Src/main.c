@@ -464,12 +464,6 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin : B1_Pin */
-  GPIO_InitStruct.Pin = B1_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
-
   /*Configure GPIO pins : PC0 PC1 PC2 */
   GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
@@ -655,8 +649,6 @@ void StartDefaultTask(void *argument)
           printf("[벨트] 정지 요청 전송 실패\r\n");
         osDelay(BELT_STOP_SETTLE_MS);
 
-        HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
-
         for (uint8_t pill_i = 0U; pill_i < PILLS_PER_BOTTLE; pill_i++)
         {
           if (pill_i > 0U)
@@ -665,7 +657,6 @@ void StartDefaultTask(void *argument)
           printf("[투입] 알약 %u정 투입 완료\r\n", (unsigned)(pill_i + 1U));
         }
 
-        HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
         HAL_GPIO_WritePin(STEPPER_ENA_GPIO_Port, STEPPER_ENA_Pin, GPIO_PIN_SET);  /* 모터 비활성 */
 
         osDelay(POST_DISPENSE_MS);
@@ -690,7 +681,6 @@ void StartDefaultTask(void *argument)
     {
       /* ── 감지 없음: 모터 비활성화 (발열 방지) ────────────── */
       HAL_GPIO_WritePin(STEPPER_ENA_GPIO_Port, STEPPER_ENA_Pin, GPIO_PIN_SET);
-      HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
       osDelay(10U);
     }
 

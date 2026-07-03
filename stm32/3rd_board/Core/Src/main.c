@@ -43,15 +43,15 @@
 /* PB8: 뚜껑 감지 센서 1 */
 #define SENSOR1_CAP_DETECTED() (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_8) == GPIO_PIN_RESET)
 
-/* 뚜껑 공급 액추에이터 제어 (IN1: PC2, IN2: PC3) 👈 PC2로 수정 완료 */
-#define NEW_ACT_FORWARD()  do { HAL_GPIO_WritePin(GPIOC, GPIO_PIN_2, GPIO_PIN_SET);   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_3, GPIO_PIN_RESET); } while(0)
-#define NEW_ACT_BACKWARD() do { HAL_GPIO_WritePin(GPIOC, GPIO_PIN_2, GPIO_PIN_RESET); HAL_GPIO_WritePin(GPIOC, GPIO_PIN_3, GPIO_PIN_SET);   } while(0)
-#define NEW_ACT_STOP()     do { HAL_GPIO_WritePin(GPIOC, GPIO_PIN_2, GPIO_PIN_RESET); HAL_GPIO_WritePin(GPIOC, GPIO_PIN_3, GPIO_PIN_RESET); } while(0)
+/* 뚜껑 공급 액추에이터 제어 (IN1: PC0, IN2: PC5) */
+#define NEW_ACT_FORWARD()  do { HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0, GPIO_PIN_SET);   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_5, GPIO_PIN_RESET); } while(0)
+#define NEW_ACT_BACKWARD() do { HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0, GPIO_PIN_RESET); HAL_GPIO_WritePin(GPIOC, GPIO_PIN_5, GPIO_PIN_SET);   } while(0)
+#define NEW_ACT_STOP()     do { HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0, GPIO_PIN_RESET); HAL_GPIO_WritePin(GPIOC, GPIO_PIN_5, GPIO_PIN_RESET); } while(0)
 
-/* 뚜껑 압착 액추에이터 제어 (IN3: PC0, IN4: PC5) - PC1, PC4 핀 불량으로 PC5 대체 */
-#define PRESS_ACT_FORWARD()  do { HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0, GPIO_PIN_SET);   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_5, GPIO_PIN_RESET); } while(0)
-#define PRESS_ACT_BACKWARD() do { HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0, GPIO_PIN_RESET); HAL_GPIO_WritePin(GPIOC, GPIO_PIN_5, GPIO_PIN_SET);   } while(0)
-#define PRESS_ACT_STOP()     do { HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0, GPIO_PIN_RESET); HAL_GPIO_WritePin(GPIOC, GPIO_PIN_5, GPIO_PIN_RESET); } while(0)
+/* 뚜껑 압착 액추에이터 제어 (IN3: PC2, IN4: PC3) */
+#define PRESS_ACT_FORWARD()  do { HAL_GPIO_WritePin(GPIOC, GPIO_PIN_2, GPIO_PIN_SET);   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_3, GPIO_PIN_RESET); } while(0)
+#define PRESS_ACT_BACKWARD() do { HAL_GPIO_WritePin(GPIOC, GPIO_PIN_2, GPIO_PIN_RESET); HAL_GPIO_WritePin(GPIOC, GPIO_PIN_3, GPIO_PIN_SET);   } while(0)
+#define PRESS_ACT_STOP()     do { HAL_GPIO_WritePin(GPIOC, GPIO_PIN_2, GPIO_PIN_RESET); HAL_GPIO_WritePin(GPIOC, GPIO_PIN_3, GPIO_PIN_RESET); } while(0)
 
 /* 서보모터 펄스 제어 편의 매크로 (TIM3 하드웨어 매핑)
  * 서보1 (PB4, TIM3_CH1) : 뚜껑 색상 선택 — 약통 색상에 맞는 뚜껑 위치로 이동
@@ -60,13 +60,13 @@
 #define SET_SERVO2_PULSE(p) __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, (p))  /* 서보2: 약통 스토퍼 */
 
 /* 서보1(뚜껑 색상 선택) 펄스 위치 (us) — 현장 튜닝 시 이 값만 수정 */
-#define SERVO1_PULSE_RED_CAP   950U   /* 빨간 뚜껑 */
+#define SERVO1_PULSE_RED_CAP   1040U   /* 빨간 뚜껑 */
 #define SERVO1_PULSE_BLUE_CAP  2300U  /* 파란 뚜껑 (그 외 색상) */
 #define SERVO1_PULSE_HOME      SERVO1_PULSE_RED_CAP  /* 대기/홈 복귀 */
 
 /* 서보2(약통 스토퍼) 펄스·램핑 — 현장 튜닝 시 이 값만 수정 */
-#define SERVO2_PULSE_OPEN     1000U  /* 스토퍼 개방 (약통 통과) */
-#define SERVO2_PULSE_CLOSED    2250U  /* 스토퍼 차단 (약통 고정) */
+#define SERVO2_PULSE_OPEN     2050U  /* 스토퍼 개방 (약통 통과) */
+#define SERVO2_PULSE_CLOSED    820U  /* 스토퍼 차단 (약통 고정) */
 #define SERVO2_PULSE_HOME      SERVO2_PULSE_CLOSED    /* 대기/홈 위치 */
 #define SERVO2_RAMP_STEP         10U  /* 램핑 1스텝당 펄스 변화량 (us) */
 #define SERVO2_RAMP_DELAY_MS     20U  /* 램핑 1스텝당 대기 (ms) */
@@ -78,10 +78,10 @@
 /* 공정1(뚜껑/압착) 타이밍 (ms) */
 #define CAP_ALIGN_BELT_MS      1000U  /* PB8 감지 후 정위치까지 벨트 추가 가동 */
 #define SERVO1_MOVE_MS         2000U  /* 서보1(뚜껑 색상) 이동 후 안정 대기 */
-#define NEW_ACT_FORWARD_MS     7500U  /* 뚜껑 공급 액추에이터 전진 */
+#define NEW_ACT_FORWARD_MS     7600U  /* 뚜껑 공급 액추에이터 전진 */
 #define NEW_ACT_BACKWARD_MS    8000U  /* 뚜껑 공급 액추에이터 후진(홈) */
-#define PRESS_ACT_FORWARD_MS   10500U  /* 압착 액추에이터 전진 */
-#define PRESS_ACT_BACKWARD_MS 11000U  /* 압착 액추에이터 후진(홈, 서보 병렬 구간 포함) */
+#define PRESS_ACT_FORWARD_MS   11000U  /* 압착 액추에이터 전진 */
+#define PRESS_ACT_BACKWARD_MS 12000U  /* 압착 액추에이터 후진(홈, 서보 병렬 구간 포함) */
 #define PRESS_PARALLEL_START_MS 2000U  /* 압착 후진 시작 후 스토퍼/벨트 병렬 시작까지 대기 */
 #define ACT_STOP_SHORT_MS       300U  /* 액추에이터 정지 후 짧은 안정화 */
 #define ACT_STOP_MED_MS         500U  /* 액추에이터 정지 후 중간 안정화 */
@@ -586,25 +586,16 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0|GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_4
-                          |GPIO_PIN_5, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0|GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_5, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12|GPIO_PIN_14|GPIO_PIN_15, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin : B1_Pin */
-  GPIO_InitStruct.Pin = B1_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : PC0 PC2 PC3 PC4
-                           PC5 */
-  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_4
-                          |GPIO_PIN_5;
+  /*Configure GPIO pins : PC0 PC2 PC3 PC5 */
+  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_5;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -623,14 +614,14 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PB1 PB2 PB8 */
-  GPIO_InitStruct.Pin = GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_8;
+  /*Configure GPIO pins : PB2 PB8 */
+  GPIO_InitStruct.Pin = GPIO_PIN_2|GPIO_PIN_8;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PB12 PB13 PB14 PB15 */
-  GPIO_InitStruct.Pin = GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15;
+  /*Configure GPIO pins : PB12 PB14 PB15 */
+  GPIO_InitStruct.Pin = GPIO_PIN_12|GPIO_PIN_14|GPIO_PIN_15;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -837,8 +828,6 @@ void StartDefaultTask(void *argument)
   {
     if (SENSOR1_CAP_DETECTED())
     {
-      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);
-
       if (cap_sequence_done == 0)
       {
         cap_sequence_done = 1;
@@ -960,8 +949,6 @@ void StartDefaultTask(void *argument)
     }
     else
     {
-      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
-
       if (prev_sensor1_state != GPIO_PIN_SET)
       {
         SET_SERVO1_PULSE(SERVO1_PULSE_HOME);

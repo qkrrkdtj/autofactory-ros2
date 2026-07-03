@@ -96,9 +96,7 @@ typedef struct {
 #define CAN_COLOR_BLUE       'B'     /* 파란 약통 (정상) */
 #define CAN_COLOR_NG         'N'     /* 불량 */
 
-/* PA5 = SPI1_SCK (AF5 고정) — LED 기능 비활성, 핀 정의만 유지 */
-#define LED_Pin               GPIO_PIN_5
-#define LED_GPIO_Port         GPIOA
+/* PA5 = SPI1_SCK (AF5 고정) — MCP2515 전용 */
 
 /* 1번 보드 → 2번 보드 CAN 벨트 제어 프로토콜 */
 #define CAN_ID_2ND_TX        0x102U
