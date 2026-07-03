@@ -60,11 +60,33 @@
     }
     .btn-csv:hover { border-color: var(--blue-border); color: var(--blue); }
 
+    /* 테이블 컨테이너 및 스크롤 설정 */
+    .table-container {
+      max-height: 680px;
+      overflow-y: auto;
+      border-bottom: 1px solid var(--border);
+    }
+    
     table { width: 100%; border-collapse: collapse; }
-    th { text-align: left; font-size: 13px; font-weight: 600; color: var(--text-muted); padding: 14px 8px; border-bottom: 1px solid var(--border); }
+    
+    /* 테이블 헤더 고정 */
+    thead th { 
+      position: sticky; 
+      top: 0; 
+      background: var(--surface); 
+      z-index: 10; 
+      text-align: left; 
+      font-size: 13px; 
+      font-weight: 600; 
+      color: var(--text-muted); 
+      padding: 14px 8px; 
+      border-bottom: 2px solid var(--border); 
+    }
+    
     td { font-size: 14px; padding: 15px 8px; border-bottom: 1px solid var(--border); }
     tr:last-child td { border-bottom: none; }
     .log-id { color: var(--text-faint); }
+    .date-text { color: var(--text-muted); font-size: 13px; } /* 날짜 디자인 추가 */
     .path { color: var(--text-muted); }
     .robot { font-weight: 700; display: inline-flex; align-items: center; gap: 6px; }
     .robot i { font-size: 15px; }
@@ -75,19 +97,22 @@
     .badge.err { color: var(--amber); border: 1px solid var(--amber-border); background: var(--amber-bg); }
     .empty { text-align: center; color: var(--text-faint); padding: 40px; }
 
+    .table-container::-webkit-scrollbar { width: 8px; }
+    .table-container::-webkit-scrollbar-track { background: var(--surface); }
+    .table-container::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+    .table-container::-webkit-scrollbar-thumb:hover { background: #475569; }
+
     @media (max-width: 900px) { body { padding: 16px; } .stat-grid { grid-template-columns: repeat(2, 1fr); } }
   </style>
 </head>
 <body>
   <div class="wrap">
 
-    <!-- 탭 -->
     <div class="tabbar">
       <a class="tab" href="/"><i class="ti ti-radar-2"></i> 실시간 관제</a>
       <a class="tab active" href="/stats"><i class="ti ti-chart-bar"></i> 공정 통계</a>
     </div>
 
-    <!-- 통계 카드 -->
     <div class="stat-grid">
       <div class="stat-card">
         <div class="stat-label">금일 누적 사이클 (전체)</div>
@@ -107,7 +132,6 @@
       </div>
     </div>
 
-    <!-- 이력 테이블 -->
     <div class="panel">
       <div class="panel-head">
         <div class="panel-title">최근 공정 완료 이력 (DB 데이터)</div>
@@ -126,31 +150,24 @@
         </div>
       </div>
 
-      <table>
-        <thead>
-          <tr>
-            <th>Log ID</th><th>완료 시간</th><th>로봇 명</th>
-            <th>작업 경로</th><th>소요 시간</th><th>상태</th>
-          </tr>
-        </thead>
-        <tbody id="log-body"></tbody>
-      </table>
+      <div class="table-container">
+        <table>
+          <thead>
+            <tr>
+              <!-- 날짜 컬럼(완료 날짜) 추가됨 -->
+              <th>Log ID</th><th>완료 날짜</th><th>완료 시간</th><th>로봇 명</th>
+              <th>작업 경로</th><th>소요 시간</th><th>상태</th>
+            </tr>
+          </thead>
+          <tbody id="log-body"></tbody>
+        </table>
+      </div>
+
     </div>
 
   </div>
 
 <script>
-  // 백엔드 연결 전 fallback 데모 데이터
-  const DEMO = {
-    summary: { total: 142, waffle1: 76, waffle2: 66, avg: 84.2 },
-    logs: [
-      { id: 8042, time: "10:12:34", robot: "Waffle 1", path: "A구역 → B구역 (적재)", duration: 82, status: "성공" },
-      { id: 8041, time: "10:11:15", robot: "Waffle 2", path: "C구역 → A구역 (복귀)", duration: 86, status: "성공" },
-      { id: 8040, time: "10:09:50", robot: "Waffle 1", path: "B구역 → C구역 (하역)", duration: 79, status: "성공" },
-      { id: 8039, time: "10:07:22", robot: "Waffle 2", path: "A구역 → C구역 (적재)", duration: null, status: "장애 정지" },
-    ]
-  };
-
   let logs = [];
 
   async function loadSummary() {
@@ -188,17 +205,22 @@
 
   function renderTable() {
     const body = document.getElementById('log-body');
+    
     if (!logs.length) {
-      body.innerHTML = '<tr><td colspan="6" class="empty">표시할 이력이 없습니다.</td></tr>';
+      body.innerHTML = '<tr><td colspan="7" class="empty">표시할 이력이 없습니다.</td></tr>';
       return;
     }
+    
     body.innerHTML = logs.map(l => {
       const wClass = l.robot === 'Waffle 1' ? 'w1' : 'w2';
       const badge  = l.status === '성공' ? 'ok' : 'err';
       const dur    = (l.duration === null || l.duration === undefined) ? '--' : l.duration + '초';
+      const date   = l.date || '----'; // 파이썬이 보내준 date 바로 사용
+      
       return `
         <tr>
           <td class="log-id">#${l.id}</td>
+          <td>${date}</td>
           <td>${l.time}</td>
           <td><span class="robot ${wClass}"><i class="ti ti-device-gamepad-2"></i> ${l.robot}</span></td>
           <td class="path">${l.path}</td>
@@ -209,14 +231,18 @@
   }
 
   function downloadCSV() {
-    const header = ['Log ID', '완료 시간', '로봇 명', '작업 경로', '소요 시간(초)', '상태'];
+    const header = ['Log ID', '완료 날짜', '완료 시간', '로봇 명', '작업 경로', '소요 시간(초)', '상태'];
     const lines = [header.join(',')];
+    
     logs.forEach(l => {
       const dur = (l.duration === null || l.duration === undefined) ? '' : l.duration;
-      const cells = [`#${l.id}`, l.time, l.robot, l.path, dur, l.status]
+      const date = l.date || ''; // CSV 다운로드 시에도 바로 사용
+      
+      const cells = [`#${l.id}`, date, l.time, l.robot, l.path, dur, l.status]
         .map(c => `"${String(c).replace(/"/g, '""')}"`);
       lines.push(cells.join(','));
     });
+    
     const blob = new Blob(['\uFEFF' + lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -226,7 +252,6 @@
     URL.revokeObjectURL(url);
   }
 
-  // 초기 로드
   loadSummary();
   loadLogs();
 </script>

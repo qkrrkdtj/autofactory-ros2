@@ -13,6 +13,7 @@ __pycache__/
 *.pyd
 .colcon_build/
 .colcon_ignore
+*.db
 COLCON_IGNORE
 
 # ── Python ────────────────────────────────────────
