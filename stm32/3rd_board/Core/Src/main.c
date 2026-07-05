@@ -78,10 +78,11 @@
 /* 공정1(뚜껑/압착) 타이밍 (ms) */
 #define CAP_ALIGN_BELT_MS      1000U  /* PB8 감지 후 정위치까지 벨트 추가 가동 */
 #define SERVO1_MOVE_MS         2000U  /* 서보1(뚜껑 색상) 이동 후 안정 대기 */
-#define NEW_ACT_FORWARD_MS     7600U  /* 뚜껑 공급 액추에이터 전진 */
-#define NEW_ACT_BACKWARD_MS    8000U  /* 뚜껑 공급 액추에이터 후진(홈) */
-#define PRESS_ACT_FORWARD_MS   11000U  /* 압착 액추에이터 전진 */
-#define PRESS_ACT_BACKWARD_MS 12000U  /* 압착 액추에이터 후진(홈, 서보 병렬 구간 포함) */
+#define NEW_ACT_FORWARD_MS       7600U  /* 뚜껑 공급 액추에이터 전진 */
+#define NEW_ACT_BACKWARD_MS      8000U  /* 뚜껑 공급 액추에이터 후진(홈) */
+#define NEW_ACT_NUDGE_MS         2000U  /* 뚜껑 공급: 중간 후진/전진 넛지 시간 */
+#define PRESS_ACT_FORWARD_MS   5300U  /* 압착 액추에이터 전진 */
+#define PRESS_ACT_BACKWARD_MS 6000U  /* 압착 액추에이터 후진(홈, 서보 병렬 구간 포함) */
 #define PRESS_PARALLEL_START_MS 2000U  /* 압착 후진 시작 후 스토퍼/벨트 병렬 시작까지 대기 */
 #define ACT_STOP_SHORT_MS       300U  /* 액추에이터 정지 후 짧은 안정화 */
 #define ACT_STOP_MED_MS         500U  /* 액추에이터 정지 후 중간 안정화 */
@@ -875,16 +876,22 @@ void StartDefaultTask(void *argument)
           SET_SERVO1_PULSE(cap_pulse);
           osDelay(SERVO1_MOVE_MS);
 
-          // STEP 2. 선택된 위치에서 뚜껑 공급용 기계식 액추에이터 전진
+          // STEP 2. 뚜껑 공급 액추에이터 전진
           printf("[공정1] 뚜껑 공급 액추에이터 전진\r\n");
           NEW_ACT_FORWARD();
           osDelay(NEW_ACT_FORWARD_MS);
 
-          printf("[공정1] 뚜껑 공급 액추에이터 정지\r\n");
-          NEW_ACT_STOP();
-          osDelay(ACT_STOP_SHORT_MS);
+          // STEP 2-1. 중간 후진 (뚜껑 걸림 방지 넛지)
+          printf("[공정1] 뚜껑 공급 액추에이터 넛지 후진\r\n");
+          NEW_ACT_BACKWARD();
+          osDelay(NEW_ACT_NUDGE_MS);
 
-          // STEP 3. 뚜껑 공급용 기계식 액추에이터 후진 복귀 (9.5초)
+          // STEP 2-2. 중간 전진 (뚜껑 안착 확인)
+          printf("[공정1] 뚜껑 공급 액추에이터 넛지 전진\r\n");
+          NEW_ACT_FORWARD();
+          osDelay(NEW_ACT_NUDGE_MS);
+
+          // STEP 3. 뚜껑 공급 액추에이터 후진 복귀
           printf("[공정1] 뚜껑 공급 액추에이터 후진\r\n");
           NEW_ACT_BACKWARD();
           osDelay(NEW_ACT_BACKWARD_MS);
