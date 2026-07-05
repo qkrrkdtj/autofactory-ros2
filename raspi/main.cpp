@@ -8,10 +8,22 @@
 #include <thread>
 #include <chrono>
 #include <sstream>
-#include <iomanip>
+#include <mutex>
+#include <condition_variable>
 
 std::atomic<bool> g_running{true};
-std::atomic<bool> g_inspect_requested{false};
+std::mutex g_inspect_mutex;
+std::condition_variable g_inspect_cv;
+bool g_inspect_requested = false;
+
+static void requestInspect()
+{
+    {
+        std::lock_guard<std::mutex> lock(g_inspect_mutex);
+        g_inspect_requested = true;
+    }
+    g_inspect_cv.notify_one();
+}
 
 int initSerial(const std::string& port, speed_t baudrate) {
     int serial_port = open(port.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
@@ -92,7 +104,7 @@ void serialReaderLoop(int serial_fd) {
             }
 
             if (rx_buf == 'S') {
-                g_inspect_requested.store(true);
+                requestInspect();
                 std::cout << "\n[수신] STM32 요청('S')" << std::endl;
             } else {
                 std::cout << "\n[수신] 예상 외 바이트: 0x"
@@ -103,14 +115,19 @@ void serialReaderLoop(int serial_fd) {
     }
 }
 
-std::string makeCaptureFilename(bool is_ok) {
+std::string makeCaptureFilename(char result) {
     const auto now = std::chrono::system_clock::now();
     const std::time_t time_value = std::chrono::system_clock::to_time_t(now);
+
+    std::string suffix;
+    if (result == 'R') suffix = "_R";
+    else if (result == 'B') suffix = "_B";
+    else suffix = "_NG";
 
     std::ostringstream filename;
     filename << "capture_"
              << std::put_time(std::localtime(&time_value), "%Y%m%d_%H%M%S")
-             << (is_ok ? "_OK" : "_NG")
+             << suffix
              << ".jpg";
     return filename.str();
 }
@@ -132,23 +149,34 @@ int main() {
     }
 
     std::cout << "STM32 serial connected. Waiting for 'S'." << std::endl;
-    std::cout << "Running... press STM32 button (exit: ESC)" << std::endl;
+    std::cout << "Running... press STM32 button (exit: Ctrl+C)" << std::endl;
 
     std::thread serial_thread(serialReaderLoop, serial_fd);
 
     cv::Mat frame, blurred, hsv, ycrcb;
-    cv::Mat blue_mask, red_mask1, red_mask2, red_mask, total_normal_mask;
+    cv::Mat blue_mask, red_mask1, red_mask2, red_mask;
 
-    while (true) {
+    while (g_running.load()) {
+        {
+            std::unique_lock<std::mutex> lock(g_inspect_mutex);
+            g_inspect_cv.wait(lock, [] {
+                return g_inspect_requested || !g_running.load();
+            });
+            if (!g_running.load()) {
+                break;
+            }
+            g_inspect_requested = false;
+        }
+
         cap >> frame;
         if (frame.empty()) {
-            break;
+            std::cerr << "프레임을 읽을 수 없습니다." << std::endl;
+            continue;
         }
 
         cv::Mat result = frame.clone();
 
-        if (g_inspect_requested.exchange(false)) {
-            std::cout << "[처리] 비전 검사 프로세스 시작" << std::endl;
+        std::cout << "[처리] 비전 검사 프로세스 시작" << std::endl;
 
             cv::cvtColor(frame, ycrcb, cv::COLOR_BGR2YCrCb);
             std::vector<cv::Mat> channels;
@@ -163,46 +191,95 @@ int main() {
             cv::Mat equalized;
             cv::cvtColor(ycrcb, equalized, cv::COLOR_YCrCb2BGR);
 
+            // CLAHE (Y-channel only) brightens dark bottle interiors without shifting hue,
+            // ensuring the full disc area is captured rather than just the bright rim ring.
             cv::GaussianBlur(equalized, blurred, cv::Size(5, 5), 0);
             cv::cvtColor(blurred, hsv, cv::COLOR_BGR2HSV);
 
-            cv::Scalar lower_blue = cv::Scalar(95, 30, 20);
-            cv::Scalar upper_blue = cv::Scalar(135, 255, 255);
-            cv::inRange(hsv, lower_blue, upper_blue, blue_mask);
+            // H=95~135: includes the teal outer ring of the blue bottle.
+            // With per-color contour detection, the red bottle's teal ring (~35k px²)
+            // S>=80 excludes low-saturation shadows (e.g. green container interior, S~20-50).
+            // H upper bound 150 includes deep blue/indigo of the bottle interior dome (H~130-145).
+            cv::inRange(hsv, cv::Scalar(95, 80, 20), cv::Scalar(150, 255, 255), blue_mask);
 
-            cv::inRange(hsv, cv::Scalar(0, 30, 20), cv::Scalar(12, 255, 255), red_mask1);
-            cv::inRange(hsv, cv::Scalar(168, 30, 20), cv::Scalar(180, 255, 255), red_mask2);
+            // S=20 lower bound captures dark/desaturated reds (e.g. dark bottle interior)
+            cv::inRange(hsv, cv::Scalar(0, 20, 20), cv::Scalar(12, 255, 255), red_mask1);
+            cv::inRange(hsv, cv::Scalar(168, 20, 20), cv::Scalar(180, 255, 255), red_mask2);
             cv::bitwise_or(red_mask1, red_mask2, red_mask);
 
-            cv::bitwise_or(blue_mask, red_mask, total_normal_mask);
-            cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(7, 7));
-            cv::morphologyEx(total_normal_mask, total_normal_mask, cv::MORPH_CLOSE, kernel);
-            cv::morphologyEx(total_normal_mask, total_normal_mask, cv::MORPH_OPEN, kernel);
+            // Red: 21x21 close bridges the ~15-25px green separator ring between outer rim and inner dome.
+            // Blue: small kernel only; RETR_EXTERNAL on the teal ring (donut) returns contourArea =
+            //       pi*R_outer^2 (~138k px^2), so no large close is needed to pass the area threshold.
+            //       A large kernel would over-expand and merge with nearby left-panel blue elements.
+            cv::Mat red_close_kernel  = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(21, 21));
+            cv::Mat open_kernel       = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(7, 7));
+            cv::morphologyEx(red_mask,  red_mask,  cv::MORPH_CLOSE, red_close_kernel);
+            cv::morphologyEx(red_mask,  red_mask,  cv::MORPH_OPEN,  open_kernel);
+            cv::morphologyEx(blue_mask, blue_mask, cv::MORPH_CLOSE, open_kernel);
+            cv::morphologyEx(blue_mask, blue_mask, cv::MORPH_OPEN,  open_kernel);
 
-            std::vector<std::vector<cv::Point>> contours;
-            cv::findContours(total_normal_mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+            std::vector<std::vector<cv::Point>> red_contours, blue_contours;
+            cv::findContours(red_mask,  red_contours,  cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+            cv::findContours(blue_mask, blue_contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
 
-            bool is_target_present = false;
-            for (const auto& contour : contours) {
-                double area = cv::contourArea(contour);
+            auto isBottleCap = [](const std::vector<cv::Point>& contour) {
+                const double area = cv::contourArea(contour);
+                if (area < 50000 || area > 500000) return false;
 
-                if (area > 80000 && area < 300000) {
-                    is_target_present = true;
-                    cv::Rect rect = cv::boundingRect(contour);
-                    cv::rectangle(result, rect, cv::Scalar(0, 255, 0), 2);
+                // Use convex hull for circularity: the raw contour perimeter is inflated
+                // by concavities between the teal ring and inner dome, but the convex hull
+                // gives a smooth boundary that yields circularity ~1.0 for a real disc.
+                std::vector<cv::Point> hull;
+                cv::convexHull(contour, hull);
+                const double hull_perimeter = cv::arcLength(hull, true);
+                const double hull_area      = cv::contourArea(hull);
+                const double circularity = (hull_perimeter > 0)
+                    ? (4.0 * CV_PI * hull_area / (hull_perimeter * hull_perimeter)) : 0.0;
+                if (circularity < 0.7) return false;
+
+                // Reject tall/wide rectangles: bounding rect must be roughly square
+                const cv::Rect br = cv::boundingRect(contour);
+                const double aspect = static_cast<double>(std::min(br.width, br.height))
+                                    / static_cast<double>(std::max(br.width, br.height));
+                if (aspect < 0.5) return false;
+
+                // Reject left/right edge noise by centroid position (mask is NOT clipped
+                // so the full disc shape is preserved for the shape checks above).
+                const cv::Moments m = cv::moments(contour);
+                if (m.m00 == 0) return false;
+                const double cx = m.m10 / m.m00;
+                return cx >= 100.0 && cx <= 540.0;
+            };
+
+            bool is_red_present = false;
+            bool is_blue_present = false;
+            for (const auto& contour : red_contours) {
+                if (isBottleCap(contour)) {
+                    is_red_present = true;
+                    cv::rectangle(result, cv::boundingRect(contour), cv::Scalar(0, 0, 255), 2);
+                }
+            }
+            for (const auto& contour : blue_contours) {
+                if (isBottleCap(contour)) {
+                    is_blue_present = true;
+                    cv::rectangle(result, cv::boundingRect(contour), cv::Scalar(255, 0, 0), 2);
                 }
             }
 
             char tx_data = 'N';
-            if (is_target_present) {
-                tx_data = 'O';
-                cv::putText(result, "LAST INSPECTION: OK", cv::Point(20, 40),
-                            cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 255, 0), 2);
-                std::cout << "[송신] 판정 결과: OK ('O')" << std::endl;
-            } else {
-                tx_data = 'N';
-                cv::putText(result, "LAST INSPECTION: NG", cv::Point(20, 40),
+            if (is_red_present) {
+                tx_data = 'R';
+                cv::putText(result, "LAST INSPECTION: RED", cv::Point(20, 40),
                             cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 0, 255), 2);
+                std::cout << "[송신] 판정 결과: RED ('R')" << std::endl;
+            } else if (is_blue_present) {
+                tx_data = 'B';
+                cv::putText(result, "LAST INSPECTION: BLUE", cv::Point(20, 40),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(255, 0, 0), 2);
+                std::cout << "[송신] 판정 결과: BLUE ('B')" << std::endl;
+            } else {
+                cv::putText(result, "LAST INSPECTION: NG", cv::Point(20, 40),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 0, 128), 2);
                 std::cout << "[송신] 판정 결과: NG ('N')" << std::endl;
             }
 
@@ -212,25 +289,19 @@ int main() {
                 std::cerr << "[송신 실패] STM32로 '" << tx_data << "' 전송 실패" << std::endl;
             }
 
-            const std::string filename = makeCaptureFilename(is_target_present);
+            const std::string filename = makeCaptureFilename(tx_data);
             if (cv::imwrite(filename, result)) {
                 std::cout << "[저장] " << filename << std::endl;
             } else {
                 std::cerr << "[저장 실패] " << filename << std::endl;
             }
-        }
 
-        cv::imshow("Inspection Screen (Interactive Mode)", result);
-
-        if (cv::waitKey(30) == 27) {
-            break;
-        }
     }
 
     g_running.store(false);
+    g_inspect_cv.notify_all();
     serial_thread.join();
     close(serial_fd);
     cap.release();
-    cv::destroyAllWindows();
     return 0;
 }
