@@ -308,6 +308,7 @@ int main(void)
   }
   else
   {
+    MCP2515_SetAcceptanceFilter(&hmcp2515, CAN_ID_1ST_TX, 0x7FFU);
     MCP2515_SetNormalMode(&hmcp2515);
     printf("[통신] CAN 연결 완료 (%lu MHz)\r\n", (unsigned long)(hmcp2515.osc_hz / 1000000U));
   }
@@ -662,33 +663,29 @@ static void CANPingTask(void *argument)
   {
     osSemaphoreAcquire(sem_can_rx, 100U);  /* INT 낙하 즉시 기상, 100ms 타임아웃 폴백 */
 
-    MCP2515_CanMsg rx = {0};
-    osMutexAcquire(canMutex, osWaitForever);
-    HAL_StatusTypeDef rx_st = MCP2515_Receive(&hmcp2515, &rx, 1U);
-    osMutexRelease(canMutex);
-    if (rx_st == HAL_OK)
+    for (;;)
     {
-      if (rx.id == CAN_ID_1ST_TX && rx.dlc >= 3U && rx.data[0] == CAN_MSG_CONTAINER)
+      MCP2515_CanMsg rx = {0};
+      osMutexAcquire(canMutex, osWaitForever);
+      HAL_StatusTypeDef rx_st = MCP2515_Receive(&hmcp2515, &rx, 1U);
+      osMutexRelease(canMutex);
+
+      if (rx_st != HAL_OK)
+        break;
+
+      if (rx.id != CAN_ID_1ST_TX || rx.dlc < 3U || rx.data[0] != CAN_MSG_CONTAINER)
+        continue;
+
+      ContainerInfo info = { .seq = rx.data[1], .color = (char)rx.data[2] };
+      if (osMessageQueuePut(sys1Queue, &info, 0U, 0U) == osOK)
       {
-        ContainerInfo info = { .seq = rx.data[1], .color = (char)rx.data[2] };
-        if (osMessageQueuePut(sys1Queue, &info, 0U, 0U) == osOK)
-        {
-          printf("[수신] 약통 도착 (번호 %u, 색상 %c) — 공정1 대기 %lu개\r\n",
-                 info.seq, info.color,
-                 (unsigned long)osMessageQueueGetCount(sys1Queue));
-        }
-        else
-        {
-          printf("[수신] 공정1 대기열 가득참 — 약통 번호 %u 누락\r\n", info.seq);
-        }
-      }
-      else if (rx.id == CAN_ID_2ND_TX || rx.id == CAN_ID_3RD_TX)
-      {
-        /* 다른 보드(1번)가 처리할 벨트/슬롯 제어 메시지 — 조용히 무시 */
+        printf("[수신] 약통 도착 (번호 %u, 색상 %c) — 공정1 대기 %lu개\r\n",
+               info.seq, info.color,
+               (unsigned long)osMessageQueueGetCount(sys1Queue));
       }
       else
       {
-        printf("[통신] 알 수 없는 메시지 무시 (ID=0x%03lX)\r\n", (unsigned long)rx.id);
+        printf("[수신] 공정1 대기열 가득참 — 약통 번호 %u 누락\r\n", info.seq);
       }
     }
   }
