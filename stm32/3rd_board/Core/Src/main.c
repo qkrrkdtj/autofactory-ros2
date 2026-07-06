@@ -76,17 +76,18 @@
 #define SYS2_QUEUE_DEPTH         8U   /* 공정2(분류) 약통 정보 대기 큐 */
 
 /* 공정1(뚜껑/압착) 타이밍 (ms) */
-#define CAP_ALIGN_BELT_MS      1000U  /* PB8 감지 후 정위치까지 벨트 추가 가동 */
-#define SERVO1_MOVE_MS         2000U  /* 서보1(뚜껑 색상) 이동 후 안정 대기 */
-#define NEW_ACT_FORWARD_MS       7600U  /* 뚜껑 공급 액추에이터 전진 */
-#define NEW_ACT_BACKWARD_MS      8000U  /* 뚜껑 공급 액추에이터 후진(홈) */
-#define NEW_ACT_NUDGE_MS         2000U  /* 뚜껑 공급: 중간 후진/전진 넛지 시간 */
-#define PRESS_ACT_FORWARD_MS   5300U  /* 압착 액추에이터 전진 */
-#define PRESS_ACT_BACKWARD_MS 6000U  /* 압착 액추에이터 후진(홈, 서보 병렬 구간 포함) */
-#define PRESS_PARALLEL_START_MS 2000U  /* 압착 후진 시작 후 스토퍼/벨트 병렬 시작까지 대기 */
-#define ACT_STOP_SHORT_MS       300U  /* 액추에이터 정지 후 짧은 안정화 */
-#define ACT_STOP_MED_MS         500U  /* 액추에이터 정지 후 중간 안정화 */
-#define ACT_STOP_BRIEF_MS       200U  /* 액추에이터 정지 후 최소 안정화 */
+#define CAP_ALIGN_BELT_MS         2000U  /* PB8 감지 후 정위치까지 벨트 추가 가동 */
+#define SERVO1_MOVE_MS            2000U  /* 서보1(뚜껑 색상) 이동 후 안정 대기 */
+#define NEW_ACT_FORWARD_MS        7600U  /* 뚜껑 공급 액추에이터 전진 */
+#define NEW_ACT_BACKWARD_MS       8000U  /* 뚜껑 공급 액추에이터 후진(홈) */
+#define NEW_ACT_NUDGE_MS          2000U  /* 뚜껑 공급: 중간 후진/전진 넛지 시간 */
+#define PRESS_ACT_FORWARD_1ST_MS  3000U  /* 압착 1차 전진 (약통 위치 고정용, 살짝 내려옴) */
+#define PRESS_ACT_FORWARD_2ND_MS  2300U  /* 압착 2차 전진 (끝까지 압착, 1차+2차 = 5.3초) */
+#define PRESS_ACT_BACKWARD_MS     6000U  /* 압착 액추에이터 후진(홈) */
+#define CAP_PASS_AFTER_PRESS_MS   2000U  /* 압착 완료 후 약통 통과 대기 */
+#define ACT_STOP_SHORT_MS          300U  /* 액추에이터 정지 후 짧은 안정화 */
+#define ACT_STOP_MED_MS            500U  /* 액추에이터 정지 후 중간 안정화 */
+#define ACT_STOP_BRIEF_MS          200U  /* 액추에이터 정지 후 최소 안정화 */
 
 /* 공정2(분류) 타이밍 (ms) */
 #define ACT2_FORWARD_MS       10000U  /* 분류 액추에이터 전진 */
@@ -656,30 +657,10 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 static void CANPingTask(void *argument)
 {
   (void)argument;
-  uint8_t  tx_counter = 0U;
-  uint32_t last_tx    = 0U;
 
   for (;;)
   {
     osSemaphoreAcquire(sem_can_rx, 100U);  /* INT 낙하 즉시 기상, 100ms 타임아웃 폴백 */
-
-    uint32_t now = osKernelGetTickCount();
-
-    if ((now - last_tx) >= 1000U)
-    {
-      last_tx = now;
-      tx_counter++;
-
-      MCP2515_CanMsg tx = {
-        .id       = 0x003U,
-        .dlc      = 2U,
-        .data     = {0x03U, tx_counter},
-        .extended = false,
-      };
-      osMutexAcquire(canMutex, osWaitForever);
-      (void)MCP2515_Send(&hmcp2515, &tx);
-      osMutexRelease(canMutex);
-    }
 
     MCP2515_CanMsg rx = {0};
     osMutexAcquire(canMutex, osWaitForever);
@@ -872,75 +853,78 @@ void StartDefaultTask(void *argument)
         }
         else
         {
-          /* 감지 후 정위치까지 벨트를 더 진행시킨 뒤, 캡/압착 동안 벨트 정지 요청 */
+          /* 감지 후 정위치까지 벨트를 더 진행시킨 뒤, 공정 동안 벨트 정지 요청 */
           cap_belt_run = 1U;
           osDelay(CAP_ALIGN_BELT_MS);
           cap_belt_run  = 0U;
           cap_belt_stop = 1U;
 
-          // STEP 1. 서보1(뚜껑 색상 선택): 약통 색상에 맞는 뚜껑 위치로 이동
+          // STEP 1. 스토퍼 개방 (압착 기구가 약통을 고정하므로 공정 내내 오픈 유지)
+          printf("[공정1] 스토퍼 오픈\r\n");
+          Servo2_MoveRamp(SERVO2_PULSE_OPEN, SERVO2_RAMP_STEP, SERVO2_RAMP_DELAY_MS);
+
+          // STEP 2. 압착 1차 (약통 위치 고정 — 살짝 내려옴)
+          printf("[공정1] 압착 1차 전진\r\n");
+          PRESS_ACT_FORWARD();
+          osDelay(PRESS_ACT_FORWARD_1ST_MS);
+          PRESS_ACT_STOP();
+          osDelay(ACT_STOP_SHORT_MS);
+
+          // STEP 3. 뚜껑 색상 선택
           uint16_t cap_pulse = (info.color == 'R') ? SERVO1_PULSE_RED_CAP : SERVO1_PULSE_BLUE_CAP;
           printf("[공정1] 뚜껑 색상 선택: %s 뚜껑\r\n",
                  (info.color == 'R') ? "빨강" : "파랑/기타");
           SET_SERVO1_PULSE(cap_pulse);
           osDelay(SERVO1_MOVE_MS);
 
-          // STEP 2. 뚜껑 공급 액추에이터 전진
+          // STEP 4. 뚜껑 공급 (전진 → 넛지 후진 → 넛지 전진 → 후진 복귀)
           printf("[공정1] 뚜껑 공급 액추에이터 전진\r\n");
           NEW_ACT_FORWARD();
           osDelay(NEW_ACT_FORWARD_MS);
 
-          // STEP 2-1. 중간 후진 (뚜껑 걸림 방지 넛지)
           printf("[공정1] 뚜껑 공급 액추에이터 넛지 후진\r\n");
           NEW_ACT_BACKWARD();
           osDelay(NEW_ACT_NUDGE_MS);
 
-          // STEP 2-2. 중간 전진 (뚜껑 안착 확인)
           printf("[공정1] 뚜껑 공급 액추에이터 넛지 전진\r\n");
           NEW_ACT_FORWARD();
           osDelay(NEW_ACT_NUDGE_MS);
 
-          // STEP 3. 뚜껑 공급 액추에이터 후진 복귀
           printf("[공정1] 뚜껑 공급 액추에이터 후진\r\n");
           NEW_ACT_BACKWARD();
           osDelay(NEW_ACT_BACKWARD_MS);
-
-          CapActuators_SetIdleBackward();
+          NEW_ACT_BACKWARD();                /* 대기 상태 유지 */
           osDelay(ACT_STOP_MED_MS);
 
-          // STEP 4. 신규 압착 액추에이터 전진 구동
-          printf("[공정1] 압착 액추에이터 전진\r\n");
-          PRESS_ACT_FORWARD();
-          osDelay(PRESS_ACT_FORWARD_MS);
-
-          printf("[공정1] 압착 액추에이터 정지\r\n");
-          PRESS_ACT_STOP();
-          osDelay(ACT_STOP_SHORT_MS);
-
-          // STEP 5. 신규 압착 액추에이터 복귀 후진 구동 (총 11초, STEP 6~9를 병렬로 수행)
-          printf("[공정1] 압착 액추에이터 후진\r\n");
-          PRESS_ACT_BACKWARD();
-          uint32_t press_back_start = osKernelGetTickCount();
-          osDelay(PRESS_PARALLEL_START_MS);
-
-          // STEP 6. 서보2(약통 스토퍼): 압착 후진과 병렬로 스토퍼 개방, 느리게 램핑
-          Servo2_MoveRamp(SERVO2_PULSE_OPEN, SERVO2_RAMP_STEP, SERVO2_RAMP_DELAY_MS);
-
-          // STEP 7. 스토퍼 개방 직후 벨트 재가동 (약통 통과 시작)
-          cap_belt_stop = 0U;               /* 벨트 재가동 */
-          cap_belt_run  = 1U;               /* 큐가 비어도 약통이 빠져나가도록 강제 가동 */
-
-          // STEP 8. 서보1(뚜껑 색상) 홈 복귀 — 압착 후진과 병렬
+          // 서보1 홈 복귀 (뚜껑 공급 완료 후)
           SET_SERVO1_PULSE(SERVO1_PULSE_HOME);
           osDelay(SERVO1_MOVE_MS);
 
-          // STEP 9. 약통 통과 후 스토퍼(서보2) 복귀(차단) — 압착 후진과 병렬
-          Servo2_MoveRamp(SERVO2_PULSE_HOME, SERVO2_RAMP_STEP, SERVO2_RAMP_DELAY_MS);  /* 스토퍼 복귀(차단) */
-          cap_belt_run  = 0U;
+          // STEP 5. 압착 2차 (끝까지 압착 — 1차 + 2차 합산 5.3초)
+          printf("[공정1] 압착 2차 전진\r\n");
+          PRESS_ACT_FORWARD();
+          osDelay(PRESS_ACT_FORWARD_2ND_MS);
+          PRESS_ACT_STOP();
+          osDelay(ACT_STOP_SHORT_MS);
 
-          // 압착 후진 총 11초 보장 후 정지 (위 서보 동작은 11초 창 안에 모두 완료)
-          while ((osKernelGetTickCount() - press_back_start) < PRESS_ACT_BACKWARD_MS)
-            osDelay(20U);
+          // STEP 6. 압착 해제 (후진 복귀)
+          printf("[공정1] 압착 후진 (해제)\r\n");
+          PRESS_ACT_BACKWARD();
+          osDelay(PRESS_ACT_BACKWARD_MS);
+          PRESS_ACT_BACKWARD();              /* 대기 상태 유지 */
+          osDelay(ACT_STOP_BRIEF_MS);
+
+          // STEP 7. 벨트 재가동 (스토퍼 이미 오픈 상태 — 약통 바로 배출)
+          printf("[공정1] 벨트 재가동 (약통 배출 중)\r\n");
+          cap_belt_stop = 0U;
+          cap_belt_run  = 1U;
+          osDelay(CAP_PASS_AFTER_PRESS_MS);
+
+          // STEP 8. 스토퍼 닫기 (약통 통과 완료 후 차단)
+          printf("[공정1] 스토퍼 닫기\r\n");
+          Servo2_MoveRamp(SERVO2_PULSE_HOME, SERVO2_RAMP_STEP, SERVO2_RAMP_DELAY_MS);
+          cap_belt_run = 0U;
+
           CapActuators_SetIdleBackward();
           osDelay(ACT_STOP_BRIEF_MS);
           printf("[공정1] 뚜껑 압착 완료\r\n");
