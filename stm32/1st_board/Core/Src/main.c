@@ -16,6 +16,8 @@
   ******************************************************************************
   */
 /* USER CODE END Header */
+/* PRINT POLICY: printf 출력은 비전 검사 명령(HandleObstacleDetected) 관련 로그만 허용한다.
+   CAN 초기화·태스크 상태·디버그 목적의 printf는 이 파일에 추가하지 않는다. */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "cmsis_os.h"
@@ -433,7 +435,6 @@ int main(void)
 
   if (MCP2515_Init(&hmcp2515) != HAL_OK)
   {
-    printf("[통신] CAN 초기화 실패\r\n");
     MCP2515_PrintDiag(&hmcp2515);
   }
   else
@@ -441,7 +442,6 @@ int main(void)
     /* mask 0x7FE: bit0 무시 → 0x102(벨트 제어)와 0x103(슬롯 신호) 동시 수용 */
     MCP2515_SetAcceptanceFilter(&hmcp2515, CAN_ID_2ND_TX, 0x7FEU);
     MCP2515_SetNormalMode(&hmcp2515);
-    printf("[통신] CAN 연결 완료 (8MHz)\r\n");
   }
   /* USER CODE END 2 */
 
