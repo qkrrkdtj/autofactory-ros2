@@ -81,9 +81,9 @@
 #define NEW_ACT_FORWARD_MS        7600U  /* 뚜껑 공급 액추에이터 전진 */
 #define NEW_ACT_BACKWARD_MS       8000U  /* 뚜껑 공급 액추에이터 후진(홈) */
 #define NEW_ACT_NUDGE_MS          2000U  /* 뚜껑 공급: 중간 후진/전진 넛지 시간 */
-#define PRESS_ACT_FORWARD_1ST_MS  8300U  /* 압착 1차 전진 (약통 위치 고정용, 살짝 내려옴) */
+#define PRESS_ACT_FORWARD_1ST_MS  7000U  /* 압착 1차 전진 (약통 위치 고정용, 살짝 내려옴) */
 #define PRESS_ACT_FORWARD_2ND_MS  2000U  /* 압착 2차 전진 (끝까지 압착, 1차+2차 = 5.3초) */
-#define PRESS_ACT_BACKWARD_MS     6000U  /* 압착 액추에이터 후진(홈) */
+#define PRESS_ACT_BACKWARD_MS     11000U  /* 압착 액추에이터 후진(홈) */
 #define CAP_PASS_AFTER_PRESS_MS   2000U  /* 압착 완료 후 약통 통과 대기 */
 #define ACT_STOP_SHORT_MS          300U  /* 액추에이터 정지 후 짧은 안정화 */
 #define ACT_STOP_MED_MS            500U  /* 액추에이터 정지 후 중간 안정화 */
@@ -855,6 +855,8 @@ void StartDefaultTask(void *argument)
           osDelay(CAP_ALIGN_BELT_MS);
           cap_belt_run  = 0U;
           cap_belt_stop = 1U;
+
+          osDelay(1000);
 
           // STEP 1. 스토퍼 개방 (압착 기구가 약통을 고정하므로 공정 내내 오픈 유지)
           printf("[공정1] 스토퍼 오픈\r\n");
