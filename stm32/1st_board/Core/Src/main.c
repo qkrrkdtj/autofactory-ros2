@@ -431,11 +431,17 @@ int main(void)
   hmcp2515.cs_pin  = MCP2515_CS_Pin;
   hmcp2515.osc_hz  = MCP2515_OSC_8MHZ;
 
-  if (MCP2515_AutoDetectOsc(&hmcp2515) == HAL_OK)
+  if (MCP2515_Init(&hmcp2515) != HAL_OK)
+  {
+    printf("[통신] CAN 초기화 실패\r\n");
+    MCP2515_PrintDiag(&hmcp2515);
+  }
+  else
   {
     /* mask 0x7FE: bit0 무시 → 0x102(벨트 제어)와 0x103(슬롯 신호) 동시 수용 */
     MCP2515_SetAcceptanceFilter(&hmcp2515, CAN_ID_2ND_TX, 0x7FEU);
     MCP2515_SetNormalMode(&hmcp2515);
+    printf("[통신] CAN 연결 완료 (8MHz)\r\n");
   }
   /* USER CODE END 2 */
 

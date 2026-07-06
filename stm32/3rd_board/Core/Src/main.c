@@ -301,7 +301,7 @@ int main(void)
   hmcp2515.cs_pin  = MCP2515_CS_Pin;
   hmcp2515.osc_hz  = MCP2515_OSC_8MHZ;
 
-  if (MCP2515_AutoDetectOsc(&hmcp2515) != HAL_OK)
+  if (MCP2515_Init(&hmcp2515) != HAL_OK)
   {
     printf("[통신] CAN 초기화 실패\r\n");
     MCP2515_PrintDiag(&hmcp2515);
@@ -310,7 +310,7 @@ int main(void)
   {
     MCP2515_SetAcceptanceFilter(&hmcp2515, CAN_ID_1ST_TX, 0x7FFU);
     MCP2515_SetNormalMode(&hmcp2515);
-    printf("[통신] CAN 연결 완료 (%lu MHz)\r\n", (unsigned long)(hmcp2515.osc_hz / 1000000U));
+    printf("[통신] CAN 연결 완료 (8MHz)\r\n");
   }
   /* USER CODE END 2 */
 

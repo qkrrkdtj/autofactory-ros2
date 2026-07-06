@@ -74,7 +74,7 @@ static HAL_StatusTypeDef MCP2515_Reset(MCP2515_HandleTypeDef *dev)
   MCP2515_CS_Low(dev);
   HAL_StatusTypeDef status = MCP2515_SPI_Transfer(dev, &cmd, &dummy, 1U);
   MCP2515_CS_High(dev);
-  HAL_Delay(10);
+  HAL_Delay(50);
   return status;
 }
 
