@@ -202,6 +202,7 @@ int main(void)
   }
   else
   {
+    MCP2515_SetAcceptanceFilter(&hmcp2515, CAN_ID_1ST_TX, 0x7FFU);
     MCP2515_SetNormalMode(&hmcp2515);
     printf("[통신] CAN 연결 완료\r\n");
   }
@@ -522,12 +523,9 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
     osSemaphoreRelease(sem_pill_trigger);
 }
 
-/* 1번 보드가 CAN 0x101로 전송하는 약통 정보(seq, color)를 수신해 containerQueue에 적재한다.
-   MCP2515 INT 핀(PB0) FALLING 엣지로 즉시 기상하며, 100ms 타임아웃 폴링을 폴백으로 사용한다. */
 static void CanRxTask(void *argument)
 {
   (void)argument;
-  MCP2515_CanMsg rx;
 
   printf("[통신] 약통 정보 수신 대기 시작\r\n");
 
@@ -535,28 +533,32 @@ static void CanRxTask(void *argument)
   {
     osSemaphoreAcquire(sem_can_rx, 100U);  /* 100ms 폴링 폴백 */
 
-    osMutexAcquire(canMutex, osWaitForever);
-    HAL_StatusTypeDef st = MCP2515_Receive(&hmcp2515, &rx, 1U);
-    osMutexRelease(canMutex);
-
-    if (st != HAL_OK)
-      continue;
-
-    if (rx.id != CAN_ID_1ST_TX || rx.dlc < 3U)
-      continue;
-
-    ContainerInfo info = { .seq = rx.data[1], .color = rx.data[2] };
-
-    if (osMessageQueuePut(containerQueue, &info, 0U, 0U) == osOK)
+    for (;;)
     {
-      uint32_t cnt = osMessageQueueGetCount(containerQueue);
-      printf("[수신] 약통 도착 (번호 %u, 색상 %c) — 대기 %lu개\r\n",
-             info.seq, info.color, (unsigned long)cnt);
-    }
-    else
-    {
-      printf("[수신] 대기열 가득참 — 약통 번호 %u 누락\r\n",
-             info.seq);
+      MCP2515_CanMsg rx = {0};
+      osMutexAcquire(canMutex, osWaitForever);
+      HAL_StatusTypeDef st = MCP2515_Receive(&hmcp2515, &rx, 1U);
+      osMutexRelease(canMutex);
+
+      if (st != HAL_OK)
+        break;
+
+      if (rx.id != CAN_ID_1ST_TX || rx.dlc < 3U || rx.data[0] != CAN_MSG_CONTAINER)
+        continue;
+
+      ContainerInfo info = { .seq = rx.data[1], .color = rx.data[2] };
+
+      if (osMessageQueuePut(containerQueue, &info, 0U, 0U) == osOK)
+      {
+        uint32_t cnt = osMessageQueueGetCount(containerQueue);
+        printf("[수신] 약통 도착 (번호 %u, 색상 %c) — 대기 %lu개\r\n",
+               info.seq, info.color, (unsigned long)cnt);
+      }
+      else
+      {
+        printf("[수신] 대기열 가득참 — 약통 번호 %u 누락\r\n",
+               info.seq);
+      }
     }
   }
 }

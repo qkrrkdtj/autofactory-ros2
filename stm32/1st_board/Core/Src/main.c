@@ -433,6 +433,8 @@ int main(void)
 
   if (MCP2515_AutoDetectOsc(&hmcp2515) == HAL_OK)
   {
+    /* mask 0x7FE: bit0 무시 → 0x102(벨트 제어)와 0x103(슬롯 신호) 동시 수용 */
+    MCP2515_SetAcceptanceFilter(&hmcp2515, CAN_ID_2ND_TX, 0x7FEU);
     MCP2515_SetNormalMode(&hmcp2515);
   }
   /* USER CODE END 2 */

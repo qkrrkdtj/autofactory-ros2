@@ -33,6 +33,23 @@
 #define MCP2515_ABTF          0x40U
 #define MCP2515_TXBO          0x20U
 
+#define MCP2515_RXM0SIDH    0x20U
+#define MCP2515_RXM0SIDL    0x21U
+#define MCP2515_RXM1SIDH    0x24U
+#define MCP2515_RXM1SIDL    0x25U
+#define MCP2515_RXF0SIDH    0x00U
+#define MCP2515_RXF0SIDL    0x01U
+#define MCP2515_RXF1SIDH    0x04U
+#define MCP2515_RXF1SIDL    0x05U
+#define MCP2515_RXF2SIDH    0x08U
+#define MCP2515_RXF2SIDL    0x09U
+#define MCP2515_RXF3SIDH    0x10U
+#define MCP2515_RXF3SIDL    0x11U
+#define MCP2515_RXF4SIDH    0x14U
+#define MCP2515_RXF4SIDL    0x15U
+#define MCP2515_RXF5SIDH    0x18U
+#define MCP2515_RXF5SIDL    0x19U
+
 static void MCP2515_CS_Low(MCP2515_HandleTypeDef *dev)
 {
   HAL_GPIO_WritePin(dev->cs_port, dev->cs_pin, GPIO_PIN_RESET);
@@ -182,6 +199,45 @@ HAL_StatusTypeDef MCP2515_RecoverBus(MCP2515_HandleTypeDef *dev)
 
   HAL_Delay(10);
   return ((MCP2515_ReadReg(dev, MCP2515_EFLG) & MCP2515_TXBO) == 0U) ? HAL_OK : HAL_ERROR;
+}
+
+/* std_id: 수신할 11비트 CAN ID
+ * std_mask: 1=해당 비트 반드시 일치, 0=무시 (완전 일치: 0x7FFU) */
+HAL_StatusTypeDef MCP2515_SetAcceptanceFilter(MCP2515_HandleTypeDef *dev,
+                                              uint16_t std_id,
+                                              uint16_t std_mask)
+{
+  if (MCP2515_SetMode(dev, MCP2515_MODE_CONFIG) != HAL_OK)
+    return HAL_ERROR;
+
+  uint8_t id_sidh   = (uint8_t)((std_id   >> 3) & 0xFFU);
+  uint8_t id_sidl   = (uint8_t)((std_id   << 5) & 0xE0U);  /* EXIDE=0: standard frame */
+  uint8_t mask_sidh = (uint8_t)((std_mask >> 3) & 0xFFU);
+  uint8_t mask_sidl = (uint8_t)((std_mask << 5) & 0xE0U);
+
+  MCP2515_WriteReg(dev, MCP2515_RXM0SIDH, mask_sidh);
+  MCP2515_WriteReg(dev, MCP2515_RXM0SIDL, mask_sidl);
+  MCP2515_WriteReg(dev, MCP2515_RXM1SIDH, mask_sidh);
+  MCP2515_WriteReg(dev, MCP2515_RXM1SIDL, mask_sidl);
+
+  MCP2515_WriteReg(dev, MCP2515_RXF0SIDH, id_sidh);
+  MCP2515_WriteReg(dev, MCP2515_RXF0SIDL, id_sidl);
+  MCP2515_WriteReg(dev, MCP2515_RXF1SIDH, id_sidh);
+  MCP2515_WriteReg(dev, MCP2515_RXF1SIDL, id_sidl);
+  MCP2515_WriteReg(dev, MCP2515_RXF2SIDH, id_sidh);
+  MCP2515_WriteReg(dev, MCP2515_RXF2SIDL, id_sidl);
+  MCP2515_WriteReg(dev, MCP2515_RXF3SIDH, id_sidh);
+  MCP2515_WriteReg(dev, MCP2515_RXF3SIDL, id_sidl);
+  MCP2515_WriteReg(dev, MCP2515_RXF4SIDH, id_sidh);
+  MCP2515_WriteReg(dev, MCP2515_RXF4SIDL, id_sidl);
+  MCP2515_WriteReg(dev, MCP2515_RXF5SIDH, id_sidh);
+  MCP2515_WriteReg(dev, MCP2515_RXF5SIDL, id_sidl);
+
+  /* RXM=00(필터 사용), RXB0에 BUKT=1(RXB0 가득 시 RXB1으로 롤오버) */
+  MCP2515_WriteReg(dev, MCP2515_RXB0CTRL, 0x04U);
+  MCP2515_WriteReg(dev, MCP2515_RXB1CTRL, 0x00U);
+
+  return HAL_OK;
 }
 
 void MCP2515_PrintDiag(MCP2515_HandleTypeDef *dev)

@@ -32,6 +32,7 @@ HAL_StatusTypeDef MCP2515_Receive(MCP2515_HandleTypeDef *dev, MCP2515_CanMsg *ms
 HAL_StatusTypeDef MCP2515_LoopbackTest(MCP2515_HandleTypeDef *dev);
 HAL_StatusTypeDef MCP2515_AutoDetectOsc(MCP2515_HandleTypeDef *dev);
 HAL_StatusTypeDef MCP2515_RecoverBus(MCP2515_HandleTypeDef *dev);
+HAL_StatusTypeDef MCP2515_SetAcceptanceFilter(MCP2515_HandleTypeDef *dev, uint16_t std_id, uint16_t std_mask);
 void MCP2515_PrintDiag(MCP2515_HandleTypeDef *dev);
 
 #endif /* MCP2515_H */
