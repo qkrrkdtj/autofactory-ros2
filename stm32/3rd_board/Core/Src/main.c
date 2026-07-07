@@ -942,6 +942,10 @@ void StartDefaultTask(void *argument)
           CAN_SendSlotAvailable();
 
         printf("[공정1] 완료\r\n");
+
+        /* 스토퍼가 이미 닫힌 시점에서 다음 감지를 허용한다.
+         * 이 시점까지 cap_sequence_done = 1 로 유지되어 공정 중 추가 감지를 차단했음. */
+        cap_sequence_done = 0;
       }
 
       osDelay(50);
