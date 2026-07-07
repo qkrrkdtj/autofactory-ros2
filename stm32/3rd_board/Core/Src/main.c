@@ -126,7 +126,7 @@ MCP2515_HandleTypeDef hmcp2515;
 osMutexId_t        canMutex;            /* MCP2515 SPI 동시 접근 방지 */
 osSemaphoreId_t    sem_can_rx;          /* MCP2515 INT 핀 낙하 → CANPingTask 즉시 기상 */
 osMessageQueueId_t sys1Queue;           /* 공정1(뚜껑): CAN 수신 → PB8 처리 대기 (최대 8) */
-osMessageQueueId_t sys2Queue;           /* 공정2(액추에이터2): 공정1 완료 → PB2 처리 대기 (최대 8) */
+osMessageQueueId_t sys2Queue;           /* 공정2(분류): CAN 수신 시 sys1Queue와 동시 삽입 → PB2 처리 대기 (최대 8) */
 
 uint8_t cap_sequence_done = 0;
 
@@ -677,6 +677,8 @@ static void CANPingTask(void *argument)
         continue;
 
       ContainerInfo info = { .seq = rx.data[1], .color = (char)rx.data[2] };
+
+      /* 공정1 큐 삽입 */
       if (osMessageQueuePut(sys1Queue, &info, 0U, 0U) == osOK)
       {
         printf("[수신] 약통 도착 (번호 %u, 색상 %c) — 공정1 대기 %lu개\r\n",
@@ -687,6 +689,18 @@ static void CANPingTask(void *argument)
       {
         printf("[수신] 공정1 대기열 가득참 — 약통 번호 %u 누락\r\n", info.seq);
       }
+
+      /* 공정2 큐 동시 삽입 — 약통이 공정2 센서 도달 전에 색상 정보를 미리 확보 */
+      if (osMessageQueuePut(sys2Queue, &info, 0U, 0U) == osOK)
+      {
+        printf("[수신] 약통 도착 (번호 %u, 색상 %c) — 공정2 대기 %lu개\r\n",
+               info.seq, info.color,
+               (unsigned long)osMessageQueueGetCount(sys2Queue));
+      }
+      else
+      {
+        printf("[수신] 공정2 대기열 가득참 — 약통 번호 %u 누락\r\n", info.seq);
+      }
     }
   }
 }
@@ -696,12 +710,32 @@ static void CANPingTask(void *argument)
 static void SortTask(void *argument)
 {
   (void)argument;
-  uint8_t sys2_sequence_done = 0U;
+  uint8_t sys2_sequence_done  = 0U;
+  uint8_t prev_sensor2_active = 0U;   /* 센서 상태 전이 감지용 */
+  uint32_t dbg_idle_tick      = 0U;   /* 비감지 주기 출력용 */
 
   for (;;)
   {
     if (SENSOR2_DETECTED())
     {
+      /* 센서 첫 감지 시 전이 로그 출력 */
+      if (!prev_sensor2_active)
+      {
+        printf("[공정2-DBG] *** 센서 감지! ***\r\n");
+        printf("[공정2-DBG]   GPIO PB2 raw  = %d (0=LOW감지, 1=HIGH)\r\n",
+               (int)HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_2));
+        printf("[공정2-DBG]   seq_done      = %u\r\n", sys2_sequence_done);
+        printf("[공정2-DBG]   sys1Queue     = %lu개\r\n",
+               (unsigned long)osMessageQueueGetCount(sys1Queue));
+        printf("[공정2-DBG]   sys2Queue     = %lu개\r\n",
+               (unsigned long)osMessageQueueGetCount(sys2Queue));
+        printf("[공정2-DBG]   cap_belt_stop = %u  sort_belt_stop = %u\r\n",
+               cap_belt_stop, sort_belt_stop);
+        printf("[공정2-DBG]   cap_belt_run  = %u  sort_belt_run  = %u\r\n",
+               cap_belt_run, sort_belt_run);
+        prev_sensor2_active = 1U;
+      }
+
       if (sys2_sequence_done == 0U)
       {
         sys2_sequence_done = 1U;
@@ -760,12 +794,37 @@ static void SortTask(void *argument)
           printf("[공정2] 분류 완료 — 벨트 재가동\r\n");
           osDelay(ACT_STOP_MED_MS);
         }
+
+        /* 공정2 완료 시점에 명시적으로 해제 — 센서가 계속 감지 중이어도 다음 약통을 처리할 수 있도록.
+         * else 분기(센서 비감지)만 의존하면 약통이 센서 위치에 정지 시 영구 잠금이 발생한다. */
+        sys2_sequence_done = 0U;
       }
 
       osDelay(50);
     }
     else
     {
+      /* 센서 비감지 전이 로그 */
+      if (prev_sensor2_active)
+      {
+        printf("[공정2-DBG] 센서 비감지 전환 — seq_done=%u\r\n", sys2_sequence_done);
+        prev_sensor2_active = 0U;
+      }
+
+      /* 500ms마다 대기 상태 주기 출력 */
+      uint32_t now = osKernelGetTickCount();
+      if ((now - dbg_idle_tick) >= 500U)
+      {
+        dbg_idle_tick = now;
+        printf("[공정2-DBG] 대기중 | PB2=%d seq_done=%u"
+               " sys1Q=%lu sys2Q=%lu belt_stop(c=%u,s=%u)\r\n",
+               (int)HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_2),
+               sys2_sequence_done,
+               (unsigned long)osMessageQueueGetCount(sys1Queue),
+               (unsigned long)osMessageQueueGetCount(sys2Queue),
+               cap_belt_stop, sort_belt_stop);
+      }
+
       sys2_sequence_done = 0U;
       SortActuator_SetIdleBackward();
       osDelay(20);
@@ -928,14 +987,6 @@ void StartDefaultTask(void *argument)
           osDelay(ACT_STOP_BRIEF_MS);
           printf("[공정1] 뚜껑 압착 완료\r\n");
         }
-
-        /* 정상/NG 공통: 공정2(PB2)에서 처리하도록 큐로 넘김 */
-        if (osMessageQueuePut(sys2Queue, &info, 0U, 0U) == osOK)
-          printf("[공정1→2] 약통 전달 (번호 %u, 색상 %c) — 공정2 대기 %lu개\r\n",
-                 info.seq, info.color,
-                 (unsigned long)osMessageQueueGetCount(sys2Queue));
-        else
-          printf("[공정1→2] 공정2 대기열 가득참 — 약통 번호 %u 누락\r\n", info.seq);
 
         /* 정상 약통만 공정1 완료 시 슬롯 반환. NG는 공정2 배출 완료 후 반환 */
         if (info.color != 'N')
