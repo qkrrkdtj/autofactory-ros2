@@ -705,6 +705,7 @@ static void CanRxTask(void *argument)
 {
   (void)argument;
   MCP2515_CanMsg rx;
+  uint8_t last_slot_seq = 0xFFU;  /* 직전에 처리된 슬롯 신호 seq — CAN 재전송 중복 차단 */
 
   for (;;)
   {
@@ -740,9 +741,16 @@ static void CanRxTask(void *argument)
       }
       else if (rx.id == CAN_ID_3RD_TX)
       {
-        /* 3번 보드 공정 완료 신호 — 슬롯 1개 반환 */
+        /* 3번 보드 공정 완료 신호 — 슬롯 1개 반환.
+         * dlc >= 2일 때 data[1]의 seq로 CAN 재전송 중복 차단 */
         if (rx.data[0] == CAN_CMD_SLOT_AVAILABLE)
         {
+          if (rx.dlc >= 2U && rx.data[1] == last_slot_seq)
+            continue;  /* 동일 seq = 재전송 프레임, 무시 */
+
+          if (rx.dlc >= 2U)
+            last_slot_seq = rx.data[1];
+
           if (g_3rd_board_slots < MAX_3RD_BOARD_SLOTS)
             g_3rd_board_slots++;
         }

@@ -205,19 +205,22 @@ static void AllActuators_SetIdleBackward(void)
 }
 
 /* 공정1 완료 시 1번 보드로 수용 가능 슬롯 신호를 전송한다.
- * 이 신호를 받은 1번 보드는 다음 약통 사이클을 시작할 수 있다. */
+ * 이 신호를 받은 1번 보드는 다음 약통 사이클을 시작할 수 있다.
+ * data[1]에 단조 증가 seq를 실어 보내 Board 1이 CAN 재전송 중복을 식별할 수 있도록 한다. */
 static void CAN_SendSlotAvailable(void)
 {
+  static uint8_t slot_seq = 0U;
   MCP2515_CanMsg tx = {
     .id       = CAN_ID_3RD_TX,
-    .dlc      = 1U,
-    .data     = {CAN_CMD_SLOT_AVAILABLE},
+    .dlc      = 2U,
+    .data     = {CAN_CMD_SLOT_AVAILABLE, slot_seq},
     .extended = false,
   };
+  slot_seq++;
   osMutexAcquire(canMutex, osWaitForever);
   (void)MCP2515_Send(&hmcp2515, &tx);
   osMutexRelease(canMutex);
-  printf("[슬롯] 1번 보드에 투입 가능 신호 전송\r\n");
+  printf("[슬롯] 1번 보드에 투입 가능 신호 전송 (seq=%u)\r\n", tx.data[1]);
 }
 
 /* 서보2(약통 스토퍼)를 target까지 step(us)씩 끊어 보내며 천천히 이동시킨다.

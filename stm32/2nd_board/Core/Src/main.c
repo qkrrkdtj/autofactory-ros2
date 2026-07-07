@@ -524,6 +524,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 static void CanRxTask(void *argument)
 {
   (void)argument;
+  uint8_t last_seq = 0xFFU;  /* 직전에 큐에 삽입된 seq — CAN 재전송 중복 차단 */
 
   printf("[통신] 약통 정보 수신 대기 시작\r\n");
 
@@ -543,6 +544,14 @@ static void CanRxTask(void *argument)
 
       if (rx.id != CAN_ID_1ST_TX || rx.dlc < 3U || rx.data[0] != CAN_MSG_CONTAINER)
         continue;
+
+      /* 동일 seq가 다시 수신되면 CAN 재전송으로 간주하고 무시 */
+      if (rx.data[1] == last_seq)
+      {
+        printf("[수신] 중복 메시지 무시 (번호 %u, EMI 재전송 추정)\r\n", rx.data[1]);
+        continue;
+      }
+      last_seq = rx.data[1];
 
       ContainerInfo info = { .seq = rx.data[1], .color = rx.data[2] };
 
