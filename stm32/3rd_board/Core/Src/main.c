@@ -90,7 +90,7 @@
 #define ACT_STOP_BRIEF_MS          200U  /* 액추에이터 정지 후 최소 안정화 */
 
 /* 공정2(분류) 타이밍 (ms) */
-#define ACT2_FORWARD_MS       10000U  /* 분류 액추에이터 전진 */
+#define ACT2_FORWARD_MS       12000U  /* 분류 액추에이터 전진 */
 #define ACT2_BACKWARD_MS      13000U  /* 분류 액추에이터 후진(홈) */
 
 /* 부팅·초기화 */
@@ -658,6 +658,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 static void CANPingTask(void *argument)
 {
   (void)argument;
+  uint8_t last_seq = 0xFFU;  /* 직전에 큐에 삽입된 seq — CAN 재전송 중복 차단 */
 
   for (;;)
   {
@@ -675,6 +676,14 @@ static void CANPingTask(void *argument)
 
       if (rx.id != CAN_ID_1ST_TX || rx.dlc < 3U || rx.data[0] != CAN_MSG_CONTAINER)
         continue;
+
+      /* 동일 seq가 다시 수신되면 CAN 재전송으로 간주하고 무시 */
+      if (rx.data[1] == last_seq)
+      {
+        printf("[수신] 중복 메시지 무시 (번호 %u, EMI 재전송 추정)\r\n", rx.data[1]);
+        continue;
+      }
+      last_seq = rx.data[1];
 
       ContainerInfo info = { .seq = rx.data[1], .color = (char)rx.data[2] };
 
@@ -712,7 +721,13 @@ static void SortTask(void *argument)
   (void)argument;
   uint8_t sys2_sequence_done  = 0U;
   uint8_t prev_sensor2_active = 0U;   /* 센서 상태 전이 감지용 */
-  uint32_t dbg_idle_tick      = 0U;   /* 비감지 주기 출력용 */
+
+  /* 변화 감지용 이전값 스냅샷 */
+  int      dbg_prev_pb2       = -1;
+  uint32_t dbg_prev_sys1q     = 0xFFFFFFFFU;
+  uint32_t dbg_prev_sys2q     = 0xFFFFFFFFU;
+  uint8_t  dbg_prev_cap_stop  = 0xFFU;
+  uint8_t  dbg_prev_sort_stop = 0xFFU;
 
   for (;;)
   {
@@ -811,18 +826,32 @@ static void SortTask(void *argument)
         prev_sensor2_active = 0U;
       }
 
-      /* 500ms마다 대기 상태 주기 출력 */
-      uint32_t now = osKernelGetTickCount();
-      if ((now - dbg_idle_tick) >= 500U)
+      /* 값이 달라졌을 때만 대기 상태 출력 */
       {
-        dbg_idle_tick = now;
-        printf("[공정2-DBG] 대기중 | PB2=%d seq_done=%u"
-               " sys1Q=%lu sys2Q=%lu belt_stop(c=%u,s=%u)\r\n",
-               (int)HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_2),
-               sys2_sequence_done,
-               (unsigned long)osMessageQueueGetCount(sys1Queue),
-               (unsigned long)osMessageQueueGetCount(sys2Queue),
-               cap_belt_stop, sort_belt_stop);
+        int      cur_pb2       = (int)HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_2);
+        uint32_t cur_sys1q     = (uint32_t)osMessageQueueGetCount(sys1Queue);
+        uint32_t cur_sys2q     = (uint32_t)osMessageQueueGetCount(sys2Queue);
+        uint8_t  cur_cap_stop  = cap_belt_stop;
+        uint8_t  cur_sort_stop = sort_belt_stop;
+
+        if (cur_pb2       != dbg_prev_pb2       ||
+            cur_sys1q     != dbg_prev_sys1q     ||
+            cur_sys2q     != dbg_prev_sys2q     ||
+            cur_cap_stop  != dbg_prev_cap_stop  ||
+            cur_sort_stop != dbg_prev_sort_stop)
+        {
+          printf("[공정2-DBG] 대기중 | PB2=%d seq_done=%u"
+                 " sys1Q=%lu sys2Q=%lu belt_stop(c=%u,s=%u)\r\n",
+                 cur_pb2, sys2_sequence_done,
+                 (unsigned long)cur_sys1q, (unsigned long)cur_sys2q,
+                 cur_cap_stop, cur_sort_stop);
+
+          dbg_prev_pb2       = cur_pb2;
+          dbg_prev_sys1q     = cur_sys1q;
+          dbg_prev_sys2q     = cur_sys2q;
+          dbg_prev_cap_stop  = cur_cap_stop;
+          dbg_prev_sort_stop = cur_sort_stop;
+        }
       }
 
       sys2_sequence_done = 0U;
