@@ -40,6 +40,8 @@
 
 ## 시스템 구성
 
+![flow](docs/images/flowchart.png)
+
 ### 1) 전체 통신 구조
 
 ```
