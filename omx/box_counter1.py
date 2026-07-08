@@ -63,7 +63,19 @@ TRAY_GREEN_RATIO = 0.05  # ROI 내 초록 픽셀 비율이 이 값 미만이면 
                          # (도킹 안됨/카메라 이상 방어. 실측 0.23~0.50 이라 안전한 바닥값)
 MIN_CORE_PX = 8          # 거리변환 코어가 이 픽셀 수 미만이면 노이즈 피크로 무시
 
-
+def _tray_centroid(grn, offset=(0, 0)):
+    m = cv2.morphologyEx(grn, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
+    cnts, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return None, None
+    c = max(cnts, key=cv2.contourArea)
+    M = cv2.moments(c)
+    if M["m00"] == 0:
+        return None, None
+    ox, oy = offset
+    return float(M["m10"] / M["m00"] + ox), float(M["m01"] / M["m00"] + oy)
+    
 def _is_valid_pill_box(x, y, w, h):
     """색은 맞지만 약통 형태가 아닌 반사/불빛 후보를 제거한다."""
     aspect = w / max(h, 1)
@@ -175,8 +187,9 @@ def count_in_tray(frame_bgr, roi=TRAY_ROI, min_area=MIN_AREA,
 
     grn = cv2.inRange(hsv, np.array(GREEN_RANGE[0]), np.array(GREEN_RANGE[1]))
     tray_found = bool((grn > 0).mean() >= TRAY_GREEN_RATIO)
+    tray_cx, tray_cy = _tray_centroid(grn, offset=(x0, y0))   # 전체프레임 px
 
-    counts = {"tray_found": tray_found}
+    counts = {"tray_found": tray_found, "tray_cx": tray_cx, "tray_cy": tray_cy}
     all_boxes = []
     for color, ranges in COLOR_RANGES.items():
         mask = _color_mask(hsv, ranges)

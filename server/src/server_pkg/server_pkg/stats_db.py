@@ -4,7 +4,7 @@ from datetime import datetime
 from contextlib import contextmanager
 
 # DB 파일은 이 스크립트와 같은 폴더에 생성됨
-DB_PATH = os.path.expanduser('~/teser/server/src/server_pkg/server_pkg/process_log.db')
+DB_PATH = os.path.expanduser('~/Documents/GitHub/autofactory-ros2/server/src/server_pkg/server_pkg/process_log.db')
 
 
 @contextmanager

@@ -60,11 +60,13 @@ from config import (
 from protocol import (
     decode_message, encode_message,
     make_ack_response, make_cycle_done, make_depart_check_response,
+    make_alignment_response,   # ← 추가
 )
 # count_in_tray 는 omx_id 에 따라 __init__ 에서 box_counter / box_counter1 중 골라 import 한다.
 
 
 DEBUG_IMAGE_DIR = os.path.join(os.path.dirname(__file__), "debug_departure")
+DEBUG_ALIGN_DIR = os.path.join(os.path.dirname(__file__), "debug_alignment")
 
 
 class OmxExecutorServer:
@@ -103,11 +105,28 @@ class OmxExecutorServer:
         # omx1(적재/A): box_counter1.count_in_tray  (트레이 3개 차면 출발)
         # omx2(분류/C): box_counter.count_in_tray   (트레이 비면 출발)
         # 각 PC 에 자기 파일만 있어도 되도록 조건부 import 사용.
+        # 정렬용 카운터는 omx1/omx2 모두 후방 캠. ROI 는 내부에서 omx_id 로 분기.
+        # 출발판정용(wrist): omx1=box_counter1(3개 차면), omx2=box_counter(비면)
         if self.omx_id == "omx1":
             from box_counter1 import count_in_tray
         else:
             from box_counter import count_in_tray
         self._count_in_tray = count_in_tray
+
+        # ── [추가] 정렬 전용: 후방 캠 카운터 + 정렬 카메라 키 ──
+        self.align_camera_key = self.cfg.get("align_camera_key", self.tray_camera_key)
+        try:
+            from box_counter_back import count_in_tray as count_in_tray_align
+            self._count_in_tray_align = count_in_tray_align
+        except ImportError:
+            self._count_in_tray_align = self._count_in_tray   # 폴백
+            
+        # __init__ 안, self._count_in_tray 세팅 근처에 추가
+        self._align_ref = None      # np.array([cx, cy])
+        self._align_Minv = None     # np.array 2x2
+        self._align_ref_angle = None  # 기준 각도(도). 없으면 None
+        self._align_tol = (0.4, 0.7)  # (앞뒤, 좌우) 성공 밴드 cm
+        self._load_alignment_ref()
 
         # ── 정책 종류 분기 (omx1=ACT, omx2=Diffusion) ──
         # omx1(적재/A): ACT 정책(pick1_ep0_400). diffusion 전용 인자는 ACTConfig 에 없으므로
@@ -131,6 +150,117 @@ class OmxExecutorServer:
         #     ]
         #     self._use_amp = True
 
+    def _load_alignment_ref(self):
+        """canonical_ref.json 에서 이 omx 의 기준점(cx,cy)과 Minv 로드.
+        없으면 정렬 비활성(측정 요청 시 tray_found=False 응답)."""
+        import json
+        ref_path = os.path.join(os.path.dirname(__file__), "canonical_ref.json")
+        try:
+            with open(ref_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            entry = data.get(self.omx_id, {})
+            pix = entry["pix2cm"]
+            if "cx" in entry and "cy" in entry:
+                self._align_ref = np.array([entry["cx"], entry["cy"]], dtype=float)
+            else:
+                self._align_ref = np.array(pix["canon_px"], dtype=float)
+                print(f"[{self.omx_id}] ⚠ 정렬 기준점(cx,cy) 없음 → canon_px 폴백")
+            self._align_Minv = np.array(pix["Minv"], dtype=float)
+            self._align_ref_angle = entry.get("angle")   # 기준 각도(도). 없으면 None
+            print(f"[{self.omx_id}] 정렬 기준 로드: ref={self._align_ref.tolist()} "
+                  f"Minv 로드됨")
+        except (FileNotFoundError, KeyError, ValueError) as e:
+            print(f"[{self.omx_id}] ⚠ 정렬 기준 로드 실패({e}) — 정렬 비활성")
+            self._align_ref = None
+            self._align_Minv = None
+
+    def _measure_alignment(self):
+        """현재 트레이 중심 측정 → (aligned, fwd_cm, lat_cm, tray_found, extra).
+        fwd_cm/lat_cm 은 '차량 보정량'(+앞/+왼). 기준·Minv 없거나 트레이 못 찾으면
+        tray_found=False. 측정 결과를 debug_alignment/ 에 이미지로 남긴다."""
+        if self._align_ref is None or self._align_Minv is None:
+            return False, 0.0, 0.0, False, {"reason": "no_ref"}, None
+ 
+        xs, ys, angs = [], [], []
+        last_frame, last_roi, last_cxcy = None, None, None
+        for _ in range(20):
+            frame = self._grab_frame_bgr(self.align_camera_key)
+            if frame is None:
+                continue
+            try:
+                counts, _b, roi = self._count_in_tray_align(frame, omx_id=self.omx_id, return_boxes=True)
+            except TypeError:
+                counts, roi = self._count_in_tray_align(frame, omx_id=self.omx_id), None
+            cx, cy = counts.get("tray_cx"), counts.get("tray_cy")
+            last_frame, last_roi = frame, roi
+            if counts.get("tray_found") and cx is not None and cy is not None:
+                xs.append(cx); ys.append(cy)
+                ang = counts.get("tray_angle")
+                if ang is not None:
+                    angs.append(ang)
+                last_cxcy = (cx, cy)
+            time.sleep(0.04)
+ 
+        if len(xs) < 5:
+            # 실패해도 마지막 프레임은 남겨서 원인 확인
+            self._save_alignment_debug(last_frame, last_roi, None, None,
+                                       0.0, 0.0, False, n=len(xs))
+            return False, 0.0, 0.0, False, {"reason": "tray_not_found", "n": len(xs)}, None
+ 
+        cur = np.array([float(np.median(xs)), float(np.median(ys))])
+        fwd_cm, lat_cm = (self._align_Minv @ (self._align_ref - cur)).tolist()
+        fwd_tol, lat_tol = self._align_tol
+        aligned = abs(fwd_cm) <= fwd_tol and abs(lat_cm) <= lat_tol
+        cur_angle = float(np.median(angs)) if angs else None
+        if cur_angle is not None and self._align_ref_angle is not None:
+            yaw_deg = cur_angle - self._align_ref_angle
+        else:
+            yaw_deg = None
+        extra = {"cur_px": cur.tolist(), "ref_px": self._align_ref.tolist(),
+                 "cur_angle": cur_angle, "ref_angle": self._align_ref_angle,
+                 "yaw_deg": yaw_deg, "n": len(xs)}
+ 
+        # ── 이동 직전 상태 저장 (프레임 + 계산값) ──
+        self._save_alignment_debug(last_frame, last_roi, cur, self._align_ref,
+                                   fwd_cm, lat_cm, aligned, n=len(xs))
+        return aligned, float(fwd_cm), float(lat_cm), True, extra, yaw_deg
+ 
+    def _save_alignment_debug(self, frame, roi, cur, ref, fwd_cm, lat_cm, aligned, n):
+        """정렬 측정 프레임에 ROI/기준점/현재중심/계산값을 그려 저장."""
+        if frame is None:
+            return
+        try:
+            os.makedirs(DEBUG_ALIGN_DIR, exist_ok=True)
+            vis = frame.copy()
+            if roi is not None:
+                x, y, w, h = roi
+                cv2.rectangle(vis, (x, y), (x + w, y + h), (0, 255, 255), 2)
+            # 기준점(파랑 원) / 현재중심(빨강 십자)
+            if ref is not None:
+                cv2.circle(vis, (int(round(ref[0])), int(round(ref[1]))),
+                           7, (255, 0, 0), 2)
+            if cur is not None:
+                cv2.drawMarker(vis, (int(round(cur[0])), int(round(cur[1]))),
+                               (0, 0, 255), cv2.MARKER_CROSS, 24, 2)
+                if ref is not None:
+                    cv2.line(vis, (int(ref[0]), int(ref[1])),
+                             (int(cur[0]), int(cur[1])), (0, 165, 255), 2)
+            status = "ALIGNED" if aligned else "MOVE"
+            l1 = f"{self.omx_id} {status} n={n}"
+            l2 = (f"cur=({cur[0]:.1f},{cur[1]:.1f}) ref=({ref[0]:.1f},{ref[1]:.1f})"
+                  if cur is not None and ref is not None else "tray NOT found")
+            l3 = f"move fwd={fwd_cm:+.2f}cm lat={lat_cm:+.2f}cm"
+            cv2.putText(vis, l1, (10, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            cv2.putText(vis, l2, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
+            cv2.putText(vis, l3, (10, 74), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                        (0, 255, 0) if aligned else (0, 165, 255), 2)
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            path = os.path.join(DEBUG_ALIGN_DIR, f"{ts}_{self.omx_id}_{status}.png")
+            cv2.imwrite(path, vis)
+            print(f"[{self.omx_id}] 정렬디버그 저장: {path}")
+        except Exception as e:
+            print(f"[{self.omx_id}] 정렬디버그 저장 실패: {e}")
+    
     # ------------------------------------------------------------------
     # 초기화: 로봇 연결 + 정책/전처리기/후처리기 로드 (서버 시작 시 한 번만)
     # ------------------------------------------------------------------
@@ -251,9 +381,28 @@ class OmxExecutorServer:
             self._on_execute_policy(conn, msg)
         elif cmd == "check_departure":
             self._on_check_departure(conn, msg)
+        # _handle_message 안 cmd 분기에 추가:
+        elif cmd == "check_alignment":
+            self._on_check_alignment(conn, msg)
         else:
             print(f"[{self.omx_id}] 알 수 없는 cmd: {msg}")
 
+    def _on_check_alignment(self, conn: socket.socket, msg: dict):
+        """정렬 오프셋 측정 요청 처리 (팔 원점 상태에서 동기 처리)."""
+        request_id = msg["request_id"]
+        wp = msg.get("wp")
+        aligned, fwd_cm, lat_cm, tray_found, extra, yaw_deg = self._measure_alignment()
+        resp = make_alignment_response(
+            request_id, wp, aligned=aligned,
+            fwd_cm=round(fwd_cm, 3), lat_cm=round(lat_cm, 3),
+            tray_found=tray_found, extra=extra,
+            yaw_deg=round(yaw_deg, 2) if yaw_deg is not None else None,
+        )
+        conn.sendall(encode_message(resp))
+        print(f"[{self.omx_id}] 정렬측정 wp={wp} tray={tray_found} "
+              f"보정=(앞{fwd_cm:+.2f},왼{lat_cm:+.2f})cm "
+              f"yaw={yaw_deg if yaw_deg is None else round(yaw_deg,2)}도 aligned={aligned}")
+        
     def _on_execute_policy(self, conn: socket.socket, msg: dict):
         request_id = msg["request_id"]
         policy_name = msg["policy_name"]
@@ -352,45 +501,32 @@ class OmxExecutorServer:
             print(f"[{self.omx_id}] 출발검증 디버그 이미지 저장 실패: {e}")
             return ""
 
-    def _grab_tray_frame_bgr(self):
-        """트레이 보는 카메라 프레임을 OpenCV용 BGR uint8 numpy로 변환해서 반환.
-
-        lerobot observation의 이미지는 보통 RGB(HWC, uint8) numpy 이지만,
-        구현/버전에 따라 torch 텐서·CHW·float[0,1]일 수 있어 방어적으로 변환한다.
-        키를 못 찾거나 변환 실패하면 None.
-        """
+    def _grab_frame_bgr(self, camera_key):
+        """지정 카메라 키의 프레임을 BGR numpy 로. (_grab_tray_frame_bgr 의 일반화)"""
         try:
             raw_obs = self.robot.get_observation()
-            img = raw_obs.get(self.tray_camera_key)
+            img = raw_obs.get(camera_key)
             if img is None:
-                print(f"[{self.omx_id}] observation에 '{self.tray_camera_key}' 키 없음 "
+                print(f"[{self.omx_id}] observation에 '{camera_key}' 키 없음 "
                       f"(가능 키: {list(raw_obs.keys())})")
                 return None
-
-            # torch 텐서 -> numpy
             if hasattr(img, "detach"):
                 img = img.detach().cpu().numpy()
             img = np.asarray(img)
-
-            # CHW -> HWC (채널이 맨 앞이고 마지막축이 3이 아닌 경우)
             if img.ndim == 3 and img.shape[0] in (1, 3) and img.shape[2] not in (1, 3):
                 img = np.transpose(img, (1, 2, 0))
-
-            # float[0,1] -> uint8
             if img.dtype != np.uint8:
-                if img.max() <= 1.0:
-                    img = (img * 255.0).clip(0, 255).astype(np.uint8)
-                else:
-                    img = img.clip(0, 255).astype(np.uint8)
-
-            # RGB -> BGR (lerobot 카메라는 RGB로 반환, cv2는 BGR 기대)
+                img = (img * 255.0).clip(0, 255).astype(np.uint8) if img.max() <= 1.0 \
+                      else img.clip(0, 255).astype(np.uint8)
             if img.ndim == 3 and img.shape[2] == 3:
                 img = img[:, :, ::-1].copy()
-
             return img
         except Exception as e:
-            print(f"[{self.omx_id}] 트레이 프레임 변환 실패: {e}")
+            print(f"[{self.omx_id}] 프레임 변환 실패({camera_key}): {e}")
             return None
+        
+    def _grab_tray_frame_bgr(self):
+        return self._grab_frame_bgr(self.tray_camera_key)
 
     # ------------------------------------------------------------------
     # 실제 로봇 실행 로직

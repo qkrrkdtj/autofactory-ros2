@@ -8,7 +8,7 @@ OMX1 / OMX2 PC의 IP, 포트, 정책 이름, 로봇 실행 관련 설정을 한 
 OMX_CONFIGS = {
     "omx1": {
         # ---- 네트워크 (관제서버 <-> OMX1 PC 통신) ----
-        "host": "192.168.100.171",   # TODO: 실제 OMX1 PC IP로 교체
+        "host": "192.168.100.83",   # TODO: 실제 OMX1 PC IP로 교체
         "port": 9001,
 
         # ---- 역할 ----
@@ -40,12 +40,12 @@ OMX_CONFIGS = {
         "port": 9002,
 
         # ---- 역할 ----
-        "policy_name": "classify1_diffusion_ep0_496",   # 분류 정책 (로그/메시지용 짧은 이름)
+        "policy_name": "classify1_ep0_800",   # 분류 정책 (로그/메시지용 짧은 이름)
         "role": "sorting",
 
         # ---- 로봇 실행 관련 (OMX2 PC 로컬에서만 사용) ----
         "robot_port": "/dev/omx_follower",          # TODO: 실제 시리얼 포트 확인 필요 (OMX1과 PC가 다르면 보통 같은 경로명일 수 있음)
-        "policy_path": "angrynose/classify1_diffusion_ep0_496",   # HuggingFace repo_id (로컬 캐시 사용)
+        "policy_path": "angrynose/classify1_ep0_800",   # HuggingFace repo_id (로컬 캐시 사용)
         "dataset_repo_id": "angrynose/classify1",   # TODO: 실제 학습 데이터셋 repo_id 확인 필요 (train_config.json의 dataset.repo_id 값)
         "home_position": {
             "shoulder_pan.pos": -0.757,

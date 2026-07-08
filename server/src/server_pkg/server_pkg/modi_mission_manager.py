@@ -11,13 +11,14 @@ import os
 
 
 class MissionManager:
-    def __init__(self, server_node, robot1_node, robot2_node, shared_state, omx_connections=None):
+    def __init__(self, server_node, robot1_node, robot2_node, shared_state, omx_connections=None, proxies=None):
         self.server_node = server_node
         self.shared_state = shared_state
         self.robot1_client = ActionClient(server_node, NavigateToPose, 'robot1/navigate_to_pose')
         self.robot2_client = ActionClient(server_node, NavigateToPose, 'robot2/navigate_to_pose')
 
         self.omx_connections = omx_connections or {}
+        self.proxies = proxies or {}   # {'robot1': ActionProxy, 'robot2': ActionProxy}
         self.WP_TO_OMX = {'A': 'omx1', 'C': 'omx2'}
         # 정책 완료(cycle_done) 대기 전용 슬롯
         self._omx_pending = {'A': None, 'C': None}
@@ -182,7 +183,67 @@ class MissionManager:
         success = await fut
         self._omx_pending[wp_name] = None
         return success
+    
+    async def _align_before_policy(self, robot_id, wp_name) -> bool:
+        """정책 실행 전 비주얼 정렬. True=정렬 확인됨, False=미완/실패."""
+        rname = 'Waffle 1' if robot_id == 'robot1' else 'Waffle 2'
+        omx = self.omx_connections.get(self.WP_TO_OMX.get(wp_name))
+        proxy = self.proxies.get(robot_id)
+        log = self.server_node.get_logger()
+        if omx is None or proxy is None:
+            log.warn(f'[{robot_id}] {wp_name} 정렬 불가 — omx/proxy 없음')
+            return False
 
+        YAW_TOL = 1.0        # 이 각도(도) 안이면 회전 보정 생략
+        MAX_ROUNDS = 5       # 측정→각도→위치 전체 반복 횟수
+
+        for rnd in range(1, MAX_ROUNDS + 1):
+            resp = await self._loop.run_in_executor(None, omx.request_alignment, wp_name)
+            if resp is None or not resp.get('tray_found'):
+                self.push_log(f'⚠ {rname}: {wp_name} 정렬 측정 실패 — 중단', 'warn')
+                log.warn(f'[{robot_id}] {wp_name} 정렬중단: 측정 실패/타임아웃 ({rnd}R)')
+                return False
+
+            log.info(f"[{robot_id}] {wp_name} 정렬 {rnd}R: "
+                    f"fwd={resp.get('fwd_cm')} lat={resp.get('lat_cm')} "
+                    f"yaw={resp.get('yaw_deg')} aligned={resp.get('aligned')}")
+
+            if resp.get('aligned'):
+                self.push_log(f'🎯 {rname}: {wp_name} 정렬 완료 ({rnd}R)', 'success')
+                log.info(f'[{robot_id}] {wp_name} 정렬 완료 ({rnd}R)')
+                return True
+
+            yaw = resp.get('yaw_deg')
+            fwd, lat = resp['fwd_cm'], resp['lat_cm']
+
+            # ── 각도부터: 임계 넘으면 회전하고 이 라운드는 여기서 끝(재측정으로) ──
+            if yaw is not None and abs(yaw) >= YAW_TOL:
+                self.push_log(f'🔧 {rname}: {wp_name} 각도보정 {yaw:+.1f}도 ({rnd}R)', 'info')
+                turned = await self._loop.run_in_executor(
+                    None, proxy.apply_alignment_yaw, yaw)
+                if not turned:
+                    self.push_log(f'⚠ {rname}: {wp_name} 각도보정 실패/중단', 'warn')
+                    log.warn(f'[{robot_id}] {wp_name} 정렬중단: 각도보정 실패 '
+                            f'(yaw={yaw:+.1f}도, {rnd}R) — odom/pause 확인')
+                    return False
+                await asyncio.sleep(0.3)   # 정지 안정화 대기 후 재측정
+                continue   # 회전했으니 다시 측정부터 (위치는 다음 라운드에)
+
+            # ── 각도 OK → 위치 보정 ──
+            self.push_log(f'🔧 {rname}: {wp_name} 위치보정 (앞{fwd:+.2f},왼{lat:+.2f})cm ({rnd}R)', 'info')
+            moved = await self._loop.run_in_executor(
+                None, proxy.apply_alignment_offset, fwd, lat)
+            if not moved:
+                self.push_log(f'⚠ {rname}: {wp_name} 위치이동 실패/중단', 'warn')
+                log.warn(f'[{robot_id}] {wp_name} 정렬중단: 위치이동 실패 '
+                        f'(앞{fwd:+.2f},왼{lat:+.2f}cm, {rnd}R) — odom/pause 확인')
+                return False
+            await asyncio.sleep(0.3)   # 정지 안정화 대기 후 재측정
+
+        self.push_log(f'⚠ {rname}: {wp_name} 정렬 {MAX_ROUNDS}R 미수렴', 'warn')
+        log.warn(f'[{robot_id}] {wp_name} 정렬 {MAX_ROUNDS}R 미수렴 — 정책 보류')
+        return False
+    
     async def _run_omx_and_wait(self, robot_id, wp_name):
         rname = 'Waffle 1' if robot_id == 'robot1' else 'Waffle 2'
 
@@ -200,6 +261,14 @@ class MissionManager:
             f'[{robot_id}] {wp_name} 도착 — OMX 작업 시작 (카메라 출발판정)'
         )
 
+        # ── 정책 실행 전 비주얼 정렬 (측정→차량보정→재측정, 최대 3회) ──
+        aligned_ok = await self._align_before_policy(robot_id, wp_name)
+        # ── 정렬 미완이어도 정책은 진행 (경고만 남김) ──
+        if not aligned_ok:
+            self.push_log(f'⚠ {rname}: {wp_name} 정렬 미완 상태로 정책 진행', 'warn')
+            self.server_node.get_logger().warn(
+                f'[{robot_id}] {wp_name} 정렬 미완 — 정책 강행 (성공률 저하 가능)')
+        
         # ── 수동 해제(강제출발) 슬롯을 이 지점 작업 내내 열어둔다 ──
         # 검출이 계속 미충족이어도 사람이 대시보드 버튼으로 언제든 빼낼 수 있게.
         manual_fut = self._loop.create_future()

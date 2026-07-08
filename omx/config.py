@@ -8,7 +8,7 @@ OMX1 / OMX2 PC의 IP, 포트, 정책 이름, 로봇 실행 관련 설정을 한 
 OMX_CONFIGS = {
     "omx1": {
         # ---- 네트워크 (관제서버 <-> OMX1 PC 통신) ----
-        "host": "192.168.100.171",   # TODO: 실제 OMX1 PC IP로 교체
+        "host": "192.168.100.83",   # TODO: 실제 OMX1 PC IP로 교체
         "port": 9001,
 
         # ---- 역할 ----
@@ -30,9 +30,11 @@ OMX_CONFIGS = {
         "cameras": {
             "observation.images.front": {"index_or_path": '/dev/cam_front', "fps": 30, "width": 640, "height": 480},
             "observation.images.wrist": {"index_or_path": '/dev/cam_wrist', "fps": 30, "width": 640, "height": 480},
+            "observation.images.rear":  {"index_or_path": '/dev/cam_back',  "fps": 30, "width": 640, "height": 480},
         },
         "depart_target_count": 3,                          # A: 3개 차면 출발
         "tray_camera_key": "observation.images.wrist",     # 트레이 보는 캠(cam_wrist)
+        "align_camera_key": "observation.images.rear",
         # home 도달 판정에서 제외할 관절 (gripper는 사이클마다 값이 흔들려 제외)
         "home_ignore_keys": ["gripper.pos"],
     },
@@ -60,9 +62,11 @@ OMX_CONFIGS = {
         "cameras": {
             "observation.images.front": {"index_or_path": '/dev/cam_front', "fps": 30, "width": 640, "height": 480},
             "observation.images.wrist": {"index_or_path": '/dev/cam_wrist', "fps": 30, "width": 640, "height": 480},
+            "observation.images.rear":  {"index_or_path": '/dev/cam_back',  "fps": 30, "width": 640, "height": 480},
         },
         "depart_target_count": 0,                          # C: 트레이 비면 출발
         "tray_camera_key": "observation.images.wrist",     # 트레이 보는 캠(cam_wrist)
+        "align_camera_key": "observation.images.rear",
         # 원점 복귀 시 좌우(shoulder_pan)가 약간 돌아가 있어도 home으로 인정.
         # gripper와 함께 판정에서 제외한다.
         "home_ignore_keys": ["gripper.pos", "shoulder_pan.pos"],
@@ -80,8 +84,8 @@ JOINT_KEYS = [
 ]
 
 # 로봇 실행 관련 안전/타이밍 설정
-HOME_THRESHOLD = 5.0       # degree, 이 값 이내면 home 도달로 판정
-MAX_EPISODE_STEPS = 3000    # policy 한 사이클의 최대 스텝 수 (안전망)
+HOME_THRESHOLD = 10.0       # degree, 이 값 이내면 home 도달로 판정
+MAX_EPISODE_STEPS = 1300    # policy 한 사이클의 최대 스텝 수 (안전망)
 HOMING_TIMEOUT = 25.0       # home 복귀 시도 최대 시간(초). 넘으면 실패 처리
 STEP_DELAY = 0.03           # 각 스텝 사이 대기 시간(초)
 

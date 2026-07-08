@@ -137,7 +137,7 @@ class ActionProxy:
             return
 
         # ── ② 이동 계획 수립 ──
-        LAT_TOL = 0.02
+        LAT_TOL = 0.005
         if abs(goal_lat) < LAT_TOL:
             turn1 = 0.0
             drive = goal_fwd              # +전진 / -후진
@@ -167,6 +167,76 @@ class ActionProxy:
         self.server_node.get_logger().info(f"[{self.robot_id}] 정밀보정 완료 ✅")
         self.cmd_vel_pub.publish(self._make_twist_stamped())
 
+    def apply_alignment_offset(self, fwd_cm, lat_cm):
+        """정렬 보정량(cm, +앞/+왼)만큼 차량을 '순수 평행이동'.
+        회전1 → 직진 → 회전2(원복)로 분해해 최종 heading 은 유지.
+        성공/미소(스킵)=True, 과다·실패·pause=False."""
+        fwd, lat = fwd_cm / 100.0, lat_cm / 100.0
+        dist = math.hypot(fwd, lat)
+        if dist < 0.003:                       # 3mm 미만 → 이동 불필요
+            return True
+        if dist > 0.30:                        # 과다 이동 방어
+            self.server_node.get_logger().warn(
+                f"[{self.robot_id}] 정렬 이동 과다({dist*100:.1f}cm) 중단")
+            return False
+
+        LAT_TOL = 0.008                        # OMX aligned 판정 lat_tol(1.0cm)보다 작게 유지
+        if abs(lat) < LAT_TOL:
+            turn1 = 0.0
+            drive = fwd
+        else:
+            ang = math.atan2(lat, fwd)
+            if abs(ang) <= math.pi / 2:
+                turn1 = ang
+                drive = dist
+            else:
+                turn1 = math.atan2(math.sin(ang - math.pi), math.cos(ang - math.pi))
+                drive = -dist
+        self.server_node.get_logger().info(
+            f"[{self.robot_id}] 정렬이동: 회전1={math.degrees(turn1):+.1f}° "
+            f"{'전진' if drive>=0 else '후진'}={abs(drive)*100:.1f}cm "
+            f"회전2=원위치복귀")
+
+        # 출발 헤딩을 기억해두고, 회전2는 상대(-turn1)가 아니라
+        # '출발 헤딩으로 절대 복귀'로 계산 → 회전/직진 중 누적된 드리프트까지 상쇄
+        od0 = self.shared_odom_state.get(self.robot_id)
+        if od0 is None:
+            self.server_node.get_logger().warn(f"[{self.robot_id}] odom 없음")
+            return False
+        yaw_start = od0['theta']
+
+        if not self._odom_rotate(turn1): return False
+        if not self._odom_drive(drive):  return False
+
+        od1 = self.shared_odom_state.get(self.robot_id)
+        if od1 is None:
+            self.server_node.get_logger().warn(f"[{self.robot_id}] odom 없음")
+            return False
+        turn2 = math.atan2(math.sin(yaw_start - od1['theta']),
+                           math.cos(yaw_start - od1['theta']))
+        if not self._odom_rotate(turn2): return False
+        self.cmd_vel_pub.publish(self._make_twist_stamped())
+        return not self._wants_pause
+    
+    def apply_alignment_yaw(self, yaw_deg):
+        """트레이 yaw 오차(도)만큼 차량을 제자리 회전해 되돌린다.
+        부호: 차량이 CW로 틀어지면 yaw_deg>0 → +각도 CCW 회전으로 원복.
+        (measure 쪽에서 확정한 부호 규약: _odom_rotate(+)=CCW)
+        미소(스킵)=True, 과다·실패·pause=False."""
+        ang = math.radians(yaw_deg)
+        if abs(yaw_deg) < 1.0:            # 1도 미만 → 회전 불필요
+            return True
+        if abs(yaw_deg) > 30.0:           # 과다 회전 방어
+            self.server_node.get_logger().warn(
+                f"[{self.robot_id}] 정렬 회전 과다({yaw_deg:.1f}도) 중단")
+            return False
+
+        self.server_node.get_logger().info(
+            f"[{self.robot_id}] 정렬회전: {yaw_deg:+.1f}도 (CCW+)")
+        if not self._odom_rotate(ang):
+            return False
+        self.cmd_vel_pub.publish(self._make_twist_stamped())
+        return not self._wants_pause
 
     # ── odom 기준 제자리 회전 ──
     def _odom_rotate(self, angle):
@@ -210,7 +280,7 @@ class ActionProxy:
 
     # ── odom 기준 직진(부호로 전/후진) ──
     def _odom_drive(self, distance):
-        if abs(distance) < 0.01:
+        if abs(distance) < 0.004:
             return True
         od0 = self.shared_odom_state.get(self.robot_id)
         if od0 is None:
@@ -220,6 +290,7 @@ class ActionProxy:
         sign = 1.0 if distance >= 0 else -1.0
         target = abs(distance)
         Kp, V_MAX, V_MIN = 1.0, 0.08, 0.02
+        Kp_yaw, W_HOLD_MAX = 1.2, 0.3          # 직진 중 헤딩 유지(드리프트 보정)
         start, dt = time.time(), 0.05
         while time.time()-start < 12.0 and not self._wants_pause:
             od = self.shared_odom_state.get(self.robot_id)
@@ -232,7 +303,10 @@ class ActionProxy:
             v = Kp*rem
             if v < V_MIN: v = V_MIN
             v = min(V_MAX, v) * sign          # 부호로 전/후진
-            self.cmd_vel_pub.publish(self._make_twist_stamped(v, 0.0))
+            yaw_err = math.atan2(math.sin(yaw0-od['theta']),
+                                 math.cos(yaw0-od['theta']))
+            w = max(-W_HOLD_MAX, min(W_HOLD_MAX, Kp_yaw*yaw_err))
+            self.cmd_vel_pub.publish(self._make_twist_stamped(v, w))
             time.sleep(dt)
         self.cmd_vel_pub.publish(self._make_twist_stamped())
         time.sleep(0.2)
@@ -452,10 +526,14 @@ def main(args=None):
             time.sleep(0.1)
         print("✅ 시작 신호 수신 — 미션을 시작합니다!")
 
+        # active_proxies 를 robot_id 키로 매핑
+        proxies = {f'robot{p.robot_id}': p for p in active_proxies}
+
         mission = MissionManager(
             server['node'], robot1['node'], robot2['node'],
             shared_state=shared_state,
             omx_connections=omx_connections,
+            proxies=proxies,
         )
         mission_holder['mission'] = mission
 

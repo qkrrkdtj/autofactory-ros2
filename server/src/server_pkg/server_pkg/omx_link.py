@@ -18,7 +18,7 @@ import time
 from .config import OMX_CONFIGS, CONNECT_TIMEOUT, RECONNECT_INTERVAL, MESSAGE_DELIMITER
 from .protocol import (
     decode_message, encode_message,
-    make_execute_policy_request, make_check_departure_request,
+    make_execute_policy_request, make_check_departure_request, make_check_alignment_request
 )
 
 
@@ -43,6 +43,9 @@ class OmxConnection:
         # OMX 수신 스레드에서 호출되므로, 콜백 안에서 asyncio 루프로 넘길 때는
         # call_soon_threadsafe 를 써야 한다 (미션 매니저가 그렇게 처리함).
         self.on_cycle_done = on_cycle_done
+
+        # ── 정렬 측정 응답 대기용 (request_id -> 결과 dict) ──
+        self._align_waiters = {}   # request_id: {"event": threading.Event, "resp": dict}
 
         # ── [추가] 카메라 출발판정(depart_check) 응답 시 호출할 콜백 ──
         # signature: on_depart_check(omx_id, wp, depart_ok, counts, tray_found)
@@ -119,6 +122,8 @@ class OmxConnection:
             self._on_cycle_done(msg)
         elif msg_type == "depart_check":
             self._on_depart_check(msg)
+        elif msg_type == "alignment":          # ← 추가
+            self._on_alignment(msg)
         else:
             print(f"[{self.omx_id}] 알 수 없는 메시지 타입: {msg}")
 
@@ -163,6 +168,15 @@ class OmxConnection:
         if self.on_depart_check is not None:
             self.on_depart_check(self.omx_id, wp, depart_ok, counts, tray_found)
 
+    def _on_alignment(self, msg: dict):
+        rid = msg.get("request_id")
+        waiter = self._align_waiters.get(rid)
+        if waiter is None:
+            print(f"[{self.omx_id}] 매칭되는 정렬 요청 없음 (request_id={rid})")
+            return
+        waiter["resp"] = msg
+        waiter["event"].set()
+
     def check_departure(self, wp: str) -> bool:
         """OMX에 출발 검증(사진 촬영 + 카운트) 요청 전송.
         반환 True=요청 전송됨, False=전송 불가(미연결).
@@ -184,6 +198,34 @@ class OmxConnection:
             print(f"[{self.omx_id}] 출발검증 요청 전송: wp={wp} "
                   f"(request_id={req['request_id']})")
             return True
+        
+    def request_alignment(self, wp: str, timeout: float = 10.0):
+        """OMX 에 정렬 오프셋 측정을 요청하고 결과를 동기적으로 받아 반환.
+
+        반환: alignment 응답 dict (fwd_cm/lat_cm/aligned/tray_found/...),
+                실패 시 None. (미션 매니저가 이 값으로 차량 보정 여부/양을 결정)
+        """
+        with self._lock:
+            if not self.connected or self.sock is None:
+                print(f"[{self.omx_id}] 미연결 — 정렬 요청 불가")
+                return None
+            req = make_check_alignment_request(wp)
+            rid = req["request_id"]
+            ev = threading.Event()
+            self._align_waiters[rid] = {"event": ev, "resp": None}
+            try:
+                self.sock.sendall(encode_message(req))
+            except OSError as e:
+                print(f"[{self.omx_id}] 정렬 요청 전송 실패: {e}")
+                self._align_waiters.pop(rid, None)
+                return None
+
+        got = ev.wait(timeout=timeout)
+        waiter = self._align_waiters.pop(rid, None)
+        if not got or waiter is None or waiter["resp"] is None:
+            print(f"[{self.omx_id}] 정렬 응답 타임아웃 ({timeout}s, request_id={rid})")
+            return None
+        return waiter["resp"]
 
     def run_policy(self) -> bool:
         """
@@ -217,3 +259,4 @@ class OmxConnection:
         conn_state = "CONNECTED" if self.connected else "DISCONNECTED"
         return (f"{self.omx_id}: {conn_state}, {state}, "
                 f"완료횟수={self.completed_count}, host={self.host}:{self.port}")
+    
