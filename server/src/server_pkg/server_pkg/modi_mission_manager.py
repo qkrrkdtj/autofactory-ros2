@@ -11,9 +11,10 @@ import os
 
 
 class MissionManager:
-    def __init__(self, server_node, robot1_node, robot2_node, shared_state, omx_connections=None, proxies=None):
+    def __init__(self, server_node, robot1_node, robot2_node, shared_state, omx_connections=None, proxies=None, conveyor_sensor=None):
         self.server_node = server_node
         self.shared_state = shared_state
+        self.conveyor_sensor = conveyor_sensor   # 컨베이어 물건 감지 (A지점 추론 게이트)
         self.robot1_client = ActionClient(server_node, NavigateToPose, 'robot1/navigate_to_pose')
         self.robot2_client = ActionClient(server_node, NavigateToPose, 'robot2/navigate_to_pose')
 
@@ -194,7 +195,9 @@ class MissionManager:
             log.warn(f'[{robot_id}] {wp_name} 정렬 불가 — omx/proxy 없음')
             return False
 
-        YAW_TOL = 1.0        # 이 각도(도) 안이면 회전 보정 생략
+        YAW_TOL = 1.5        # 이 각도(도) 안이면 회전 보정 생략
+                             # 주의: _odom_rotate 의 스킵 임계(0.005rad≈0.29도)보다 커야
+                             # '회전 지시했는데 실제로는 스킵'되는 데드존이 안 생긴다
         MAX_ROUNDS = 5       # 측정→각도→위치 전체 반복 횟수
 
         for rnd in range(1, MAX_ROUNDS + 1):
@@ -226,7 +229,7 @@ class MissionManager:
                     log.warn(f'[{robot_id}] {wp_name} 정렬중단: 각도보정 실패 '
                             f'(yaw={yaw:+.1f}도, {rnd}R) — odom/pause 확인')
                     return False
-                await asyncio.sleep(0.3)   # 정지 안정화 대기 후 재측정
+                await asyncio.sleep(1.0)   # 정지 안정화 대기 후 재측정
                 continue   # 회전했으니 다시 측정부터 (위치는 다음 라운드에)
 
             # ── 각도 OK → 위치 보정 ──
@@ -238,12 +241,48 @@ class MissionManager:
                 log.warn(f'[{robot_id}] {wp_name} 정렬중단: 위치이동 실패 '
                         f'(앞{fwd:+.2f},왼{lat:+.2f}cm, {rnd}R) — odom/pause 확인')
                 return False
-            await asyncio.sleep(0.3)   # 정지 안정화 대기 후 재측정
+            await asyncio.sleep(1.0)   # 정지 안정화 대기 후 재측정
 
         self.push_log(f'⚠ {rname}: {wp_name} 정렬 {MAX_ROUNDS}R 미수렴', 'warn')
         log.warn(f'[{robot_id}] {wp_name} 정렬 {MAX_ROUNDS}R 미수렴 — 정책 보류')
         return False
     
+    async def _wait_conveyor_item(self, rname, robot_id, wp_name, manual_fut):
+        """A지점(omx1) 전용: 컨베이어 물건 감지(IR) 신호가 올 때까지 대기.
+
+        - wp가 A가 아니거나 센서 링크가 없으면 즉시 통과.
+        - 수동 강제출발(manual_fut)이 눌리면 즉시 반환 (호출부에서 처리).
+        - 센서 신호 끊김(라즈베리파이 다운)이면 경고 후 즉시 통과 —
+          센서 고장으로 라인 전체가 멈추는 것 방지.
+        """
+        if wp_name != 'A' or self.conveyor_sensor is None:
+            return
+
+        if not self.conveyor_sensor.alive():
+            self.push_log(f'⚠ {rname}: {wp_name} 컨베이어 센서 신호 없음 — 감지 없이 진행', 'warn')
+            self.server_node.get_logger().warn(
+                f'[{robot_id}] {wp_name} 컨베이어 센서 미수신 — 게이트 생략')
+            return
+
+        if self.conveyor_sensor.item_present():
+            return
+
+        self.push_log(f'⏳ {rname}: {wp_name} 컨베이어 물건 대기 중...', 'info')
+        self.server_node.get_logger().info(
+            f'[{robot_id}] {wp_name} 컨베이어 물건 대기 시작')
+        while not manual_fut.done():
+            if self.conveyor_sensor.item_present():
+                self.push_log(f'📦 {rname}: {wp_name} 컨베이어 물건 감지 — 추론 시작', 'success')
+                self.server_node.get_logger().info(
+                    f'[{robot_id}] {wp_name} 컨베이어 물건 감지 — 추론 진행')
+                return
+            if not self.conveyor_sensor.alive():
+                self.push_log(f'⚠ {rname}: {wp_name} 컨베이어 센서 신호 끊김 — 감지 없이 진행', 'warn')
+                self.server_node.get_logger().warn(
+                    f'[{robot_id}] {wp_name} 대기 중 센서 신호 끊김 — 게이트 생략')
+                return
+            await asyncio.sleep(0.2)
+
     async def _run_omx_and_wait(self, robot_id, wp_name):
         rname = 'Waffle 1' if robot_id == 'robot1' else 'Waffle 2'
 
@@ -278,6 +317,13 @@ class MissionManager:
         try:
             while True:
                 # 강제출발(수동)이 이미 눌렸으면 즉시 출발
+                if manual_fut.done():
+                    self.push_log(f'🔓 {rname}: {wp_name} 수동 강제출발', 'success')
+                    break
+
+                # ── A지점: 컨베이어에 물건이 감지될 때까지 추론 보류 ──
+                # (차량은 이미 도착한 상태이므로 '도착 AND 물건 감지'가 충족돼야 추론 시작)
+                await self._wait_conveyor_item(rname, robot_id, wp_name, manual_fut)
                 if manual_fut.done():
                     self.push_log(f'🔓 {rname}: {wp_name} 수동 강제출발', 'success')
                     break

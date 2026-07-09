@@ -15,7 +15,7 @@ import socket
 import threading
 import time
 
-from .config import OMX_CONFIGS, CONNECT_TIMEOUT, RECONNECT_INTERVAL, MESSAGE_DELIMITER
+from .config import OMX_CONFIGS, CONNECT_TIMEOUT, RECONNECT_INTERVAL, MESSAGE_DELIMITER, ALIGN_TIMEOUT
 from .protocol import (
     decode_message, encode_message,
     make_execute_policy_request, make_check_departure_request, make_check_alignment_request
@@ -199,7 +199,7 @@ class OmxConnection:
                   f"(request_id={req['request_id']})")
             return True
         
-    def request_alignment(self, wp: str, timeout: float = 10.0):
+    def request_alignment(self, wp: str, timeout: float = ALIGN_TIMEOUT):
         """OMX 에 정렬 오프셋 측정을 요청하고 결과를 동기적으로 받아 반환.
 
         반환: alignment 응답 dict (fwd_cm/lat_cm/aligned/tray_found/...),

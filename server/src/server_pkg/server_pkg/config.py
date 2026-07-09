@@ -83,9 +83,15 @@ STEP_DELAY = 0.03           # 각 스텝 사이 대기 시간(초)
 # 연결 관련 타임아웃 설정 (초)
 CONNECT_TIMEOUT = 5.0          # 최초 TCP 연결 시도 타임아웃
 RECONNECT_INTERVAL = 3.0       # 연결 끊겼을 때 재연결 시도 간격
+ALIGN_TIMEOUT = 30.0           # 정렬 측정 요청 후 응답을 기다리는 최대 시간
+                                 # (OMX 쪽 카메라 프레임 확보/검출 재시도가 10초를 넘길 수 있음)
 POLICY_TIMEOUT = 60.0          # 정책 실행 요청 후 완료 메시지를 기다리는 최대 시간
                                  # (이 시간 넘으면 "응답 없음" 으로 간주하고 경고)
 
 # 메시지 구분자 (한 줄 = 한 메시지, 줄바꿈으로 구분)
 MESSAGE_DELIMITER = b"\n"
+
+# ── 컨베이어 물건 감지 센서 (라즈베리파이 → 관제서버 UDP) ──
+CONVEYOR_SENSOR_PORT = 9100        # UDP 수신 포트 (라즈베리파이 stepper.py가 이 포트로 전송)
+CONVEYOR_SENSOR_FRESH_SEC = 2.0    # 이 시간 내 수신이 없으면 신호 무효(끊김) 처리
 

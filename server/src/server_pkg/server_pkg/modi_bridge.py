@@ -10,6 +10,7 @@ from nav_msgs.msg import Odometry
 from server_pkg.modi_mission_manager import MissionManager, start_mission
 from server_pkg.modi_flask import create_flask_app
 from server_pkg.omx_link import OmxConnection
+from server_pkg.conveyor_sensor import ConveyorSensorLink
 from server_pkg.ssh_launcher import launch_all, kill_all
 import threading
 import math
@@ -79,93 +80,12 @@ class ActionProxy:
         )
 
         if status == GoalStatus.STATUS_SUCCEEDED:
-            self._run_correction_blocking()
             goal_handle.succeed()
         else:
             goal_handle.abort()
 
         self.active_client_goal_handle = None
         return result_wrapper.result
-
-    # ──────────────────────────────────────────────
-    # P보정을 별도 스레드에서 돌리고 완료까지 대기
-    # (asyncio.sleep을 콜백 스레드에서 쓰면 'no running event loop' 발생 →
-    #  threading.Event.wait로 대기)
-    # ──────────────────────────────────────────────
-    def _run_correction_blocking(self):
-        done = threading.Event()
-
-        def worker():
-            try:
-                self._p_correction_sync()
-            finally:
-                done.set()
-
-        threading.Thread(target=worker, daemon=True).start()
-        done.wait()
-
-    def _p_correction_sync(self):
-        my_wp = self.shared_state.get('current_wp', {}).get(self.robot_id)
-
-        if my_wp not in ['A','C','D']:
-            return
-        
-        if self.last_goal is None:
-            return
-
-        # ── ① amcl로 목표 위치를 '한 번만' 측정 ──
-        pose = self.shared_pose_state.get(self.robot_id)
-        if pose is None:
-            return
-        target_x = self.last_goal.pose.pose.position.x
-        target_y = self.last_goal.pose.pose.position.y
-        q = self.last_goal.pose.pose.orientation
-        target_yaw = math.atan2(2.0*(q.w*q.z+q.x*q.y), 1.0-2.0*(q.y*q.y+q.z*q.z))
-
-        dx, dy = target_x-pose['x'], target_y-pose['y']
-        c, s = math.cos(pose['theta']), math.sin(pose['theta'])
-        goal_fwd =  c*dx + s*dy      # +앞 / -뒤
-        goal_lat = -s*dx + c*dy      # +왼 / -오
-        goal_final_yaw = math.atan2(math.sin(target_yaw-pose['theta']),
-                                    math.cos(target_yaw-pose['theta']))
-
-        self.server_node.get_logger().info(
-            f"[{self.robot_id}] 보정측정 fwd={goal_fwd*100:.1f}cm lat={goal_lat*100:.1f}cm")
-
-        if math.hypot(goal_fwd, goal_lat) > 0.30:
-            self.server_node.get_logger().warn(f"[{self.robot_id}] 거리 과다 중단")
-            return
-
-        # ── ② 이동 계획 수립 ──
-        LAT_TOL = 0.005
-        if abs(goal_lat) < LAT_TOL:
-            turn1 = 0.0
-            drive = goal_fwd              # +전진 / -후진
-            turn2 = goal_final_yaw
-        else:
-            ang_to_goal = math.atan2(goal_lat, goal_fwd)
-            if abs(ang_to_goal) <= math.pi/2:
-                turn1 = ang_to_goal
-                drive = math.hypot(goal_fwd, goal_lat)     # 전진
-            else:
-                turn1 = math.atan2(math.sin(ang_to_goal - math.pi),
-                                   math.cos(ang_to_goal - math.pi))
-                drive = -math.hypot(goal_fwd, goal_lat)    # 후진
-            turn2 = math.atan2(math.sin(goal_final_yaw - turn1),
-                               math.cos(goal_final_yaw - turn1))
-
-        self.server_node.get_logger().info(
-            f"[{self.robot_id}] 계획: 회전1={math.degrees(turn1):+.1f}° "
-            f"{'전진' if drive>=0 else '후진'}={abs(drive)*100:.1f}cm "
-            f"회전2={math.degrees(turn2):+.1f}°")
-
-        # ── ③ odom으로 순차 실행 ──
-        if not self._odom_rotate(turn1):  return
-        if not self._odom_drive(drive):   return
-        if not self._odom_rotate(turn2):  return
-
-        self.server_node.get_logger().info(f"[{self.robot_id}] 정밀보정 완료 ✅")
-        self.cmd_vel_pub.publish(self._make_twist_stamped())
 
     def apply_alignment_offset(self, fwd_cm, lat_cm):
         """정렬 보정량(cm, +앞/+왼)만큼 차량을 '순수 평행이동'.
@@ -241,7 +161,9 @@ class ActionProxy:
     # ── odom 기준 제자리 회전 ──
     def _odom_rotate(self, angle):
         """angle 라디안만큼 제자리 회전. 부호=방향(+반시계/-시계). 최단방향은 호출부에서 결정."""
-        if abs(angle) < 0.02:
+        # 스킵 임계는 미션 매니저 YAW_TOL(1.5도≈0.026rad)보다 반드시 작게 —
+        # 아니면 회전 지시가 조용히 무시되는 데드존이 생겨 정렬이 수렴하지 않는다
+        if abs(angle) < 0.005:
             return True
         od0 = self.shared_odom_state.get(self.robot_id)
         if od0 is None:
@@ -280,7 +202,9 @@ class ActionProxy:
 
     # ── odom 기준 직진(부호로 전/후진) ──
     def _odom_drive(self, distance):
-        if abs(distance) < 0.004:
+        # 스킵/정지 임계는 OMX aligned 판정 밴드(앞뒤 0.4cm)보다 반드시 작게 —
+        # 아니면 0.4~0.5cm 오차 구간에서 이동 지시가 무시되어 정렬이 수렴하지 않는다
+        if abs(distance) < 0.002:
             return True
         od0 = self.shared_odom_state.get(self.robot_id)
         if od0 is None:
@@ -298,7 +222,7 @@ class ActionProxy:
             mdx, mdy = od['x']-x0, od['y']-y0
             moved = abs(math.cos(yaw0)*mdx + math.sin(yaw0)*mdy)
             rem = target - moved
-            if rem < 0.005:
+            if rem < 0.002:
                 break
             v = Kp*rem
             if v < V_MIN: v = V_MIN
@@ -520,6 +444,10 @@ def main(args=None):
     for omx in omx_connections.values():
         omx.start()
 
+    # 컨베이어 물건 감지 센서 (라즈베리파이 → UDP) 수신 시작
+    conveyor_sensor = ConveyorSensorLink()
+    conveyor_sensor.start()
+
     try:
         print("\n⏳ 대시보드에서 [미션 시작] 버튼을 눌러주세요...")
         while not start_event.is_set():
@@ -534,6 +462,7 @@ def main(args=None):
             shared_state=shared_state,
             omx_connections=omx_connections,
             proxies=proxies,
+            conveyor_sensor=conveyor_sensor,
         )
         mission_holder['mission'] = mission
 

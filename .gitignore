@@ -114,3 +114,4 @@ Thumbs.db
 *.yaml.bak
 tmp/
 temp/
+*.png
